@@ -6,6 +6,7 @@
       this.onChange = onChange;
       this.startPromise = null;
       this.stopPromise = null;
+      this.lifecycleVersion = 0;
       this.state = this.createOffState();
     }
 
@@ -14,11 +15,12 @@
     }
 
     start() {
+      if (this.stopPromise) return this.stopPromise.then(() => this.start());
       if (this.startPromise) return this.startPromise;
       if (this.state.session.state === 'ready') return Promise.resolve(this.snapshot());
-      if (this.stopPromise) return this.stopPromise.then(() => this.start());
 
-      this.startPromise = this.startSession().finally(() => {
+      const lifecycleVersion = this.lifecycleVersion;
+      this.startPromise = this.startSession(lifecycleVersion).finally(() => {
         this.startPromise = null;
       });
       return this.startPromise;
@@ -28,13 +30,14 @@
       if (this.stopPromise) return this.stopPromise;
       if (this.state.session.state === 'off') return Promise.resolve(this.snapshot());
 
-      this.stopPromise = this.stopSession().finally(() => {
+      this.lifecycleVersion += 1;
+      this.stopPromise = this.stopSession(this.startPromise).finally(() => {
         this.stopPromise = null;
       });
       return this.stopPromise;
     }
 
-    async startSession() {
+    async startSession(lifecycleVersion) {
       this.state.session.state = 'starting';
       this.setChannelStarting('microphone');
       this.setChannelStarting('system');
@@ -44,6 +47,8 @@
         Promise.resolve().then(() => this.channels.microphone.start()),
         Promise.resolve().then(() => this.channels.system.start())
       ]);
+
+      if (!this.isCurrentLifecycle(lifecycleVersion)) return this.snapshot();
 
       this.applyChannelResult('microphone', results[0]);
       this.applyChannelResult('system', results[1]);
@@ -64,6 +69,11 @@
         pipelineActive = false;
       }
 
+      if (!this.isCurrentLifecycle(lifecycleVersion)) {
+        if (pipelineActive) await this.setPipelineActive(false);
+        return this.snapshot();
+      }
+
       if (!pipelineActive) {
         await this.cleanupAfterFailedStart();
         return this.snapshot();
@@ -74,10 +84,11 @@
       return this.snapshot();
     }
 
-    async stopSession() {
+    async stopSession(interruptedStart) {
       this.state.session.state = 'stopping';
       this.publish();
       await this.setPipelineActive(false);
+      if (interruptedStart) await interruptedStart;
       await Promise.allSettled([
         Promise.resolve().then(() => this.channels.microphone.stop()),
         Promise.resolve().then(() => this.channels.system.stop())
@@ -85,6 +96,10 @@
       this.state = this.createOffState();
       this.publish();
       return this.snapshot();
+    }
+
+    isCurrentLifecycle(lifecycleVersion) {
+      return lifecycleVersion === this.lifecycleVersion;
     }
 
     async cleanupAfterFailedStart() {

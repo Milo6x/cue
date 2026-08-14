@@ -128,6 +128,94 @@ test('deduplicates concurrent starts and concurrent stops', async () => {
   assert.equal(coordinator.snapshot().session.state, 'off');
 });
 
+test('keeps capture off when stop interrupts an in-flight start', async () => {
+  let releaseMicrophone;
+  let releaseSystem;
+  const microphoneGate = new Promise((resolve) => { releaseMicrophone = resolve; });
+  const systemGate = new Promise((resolve) => { releaseSystem = resolve; });
+  const drivers = createDrivers({
+    microphoneStart: async () => {
+      await microphoneGate;
+      return { trackLabel: 'Built-in Microphone' };
+    },
+    systemStart: async () => {
+      await systemGate;
+      return { trackLabel: 'Zoom Audio' };
+    }
+  });
+  const pipelineCalls = [];
+  const changes = [];
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async (active) => {
+      pipelineCalls.push(active);
+      return true;
+    },
+    onChange: (snapshot) => changes.push(snapshot)
+  });
+
+  const starting = coordinator.start();
+  const stopping = coordinator.stop();
+  releaseMicrophone();
+  releaseSystem();
+  await Promise.all([starting, stopping]);
+
+  assert.deepEqual(coordinator.snapshot(), {
+    session: { state: 'off' },
+    microphone: { state: 'off', trackLabel: null, errorCategory: null, errorMessage: null },
+    system: { state: 'off', trackLabel: null, errorCategory: null, errorMessage: null }
+  });
+  assert.equal(pipelineCalls.at(-1), false);
+  assert.deepEqual(drivers.calls, {
+    microphone: { start: 1, stop: 1 },
+    system: { start: 1, stop: 1 }
+  });
+  assert.ok(!changes.some((snapshot) => snapshot.session.state === 'ready'));
+});
+
+test('starts a new lifecycle only after an interrupted start has stopped', async () => {
+  let releaseMicrophone;
+  let releaseSystem;
+  const microphoneGate = new Promise((resolve) => { releaseMicrophone = resolve; });
+  const systemGate = new Promise((resolve) => { releaseSystem = resolve; });
+  let microphoneStarts = 0;
+  let systemStarts = 0;
+  const drivers = createDrivers({
+    microphoneStart: async () => {
+      microphoneStarts += 1;
+      if (microphoneStarts === 1) await microphoneGate;
+      return { trackLabel: 'Built-in Microphone' };
+    },
+    systemStart: async () => {
+      systemStarts += 1;
+      if (systemStarts === 1) await systemGate;
+      return { trackLabel: 'Zoom Audio' };
+    }
+  });
+  const pipelineCalls = [];
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async (active) => {
+      pipelineCalls.push(active);
+      return true;
+    }
+  });
+
+  const firstStart = coordinator.start();
+  const stopping = coordinator.stop();
+  const secondStart = coordinator.start();
+  releaseMicrophone();
+  releaseSystem();
+  await Promise.all([firstStart, stopping, secondStart]);
+
+  assert.equal(coordinator.snapshot().session.state, 'ready');
+  assert.deepEqual(drivers.calls, {
+    microphone: { start: 2, stop: 1 },
+    system: { start: 2, stop: 1 }
+  });
+  assert.deepEqual(pipelineCalls, [false, true]);
+});
+
 test('cleans partial resources when pipeline activation is unavailable', async () => {
   const drivers = createDrivers();
   const pipelineCalls = [];
