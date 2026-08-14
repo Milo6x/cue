@@ -5,6 +5,8 @@ const { OPTIONAL_API_KEY_PLACEHOLDER } = require('../src/openai-compatible');
 
 let capturedClientOptions = null;
 let capturedCompletionRequest = null;
+let capturedCompletionOptions = null;
+let capturedAnthropicRequestOptions = null;
 let openAICompletionError = null;
 const originalModuleLoad = Module._load;
 
@@ -15,8 +17,9 @@ Module._load = function loadWithOpenAIStub(request, parent, isMain) {
         capturedClientOptions = clientOptions;
         this.chat = {
           completions: {
-            create: async (completionRequest) => {
+            create: async (completionRequest, completionOptions) => {
               capturedCompletionRequest = completionRequest;
+              capturedCompletionOptions = completionOptions;
               if (openAICompletionError) throw openAICompletionError;
               return [{ choices: [{ delta: { content: 'ok' } }] }];
             }
@@ -25,10 +28,22 @@ Module._load = function loadWithOpenAIStub(request, parent, isMain) {
       }
     };
   }
+  if (request === '@anthropic-ai/sdk') {
+    return class FakeAnthropic {
+      constructor() {
+        this.messages = {
+          create: async (_request, requestOptions) => {
+            capturedAnthropicRequestOptions = requestOptions;
+            return [{ type: 'content_block_delta', delta: { type: 'text_delta', text: 'ok' } }];
+          }
+        };
+      }
+    };
+  }
   return originalModuleLoad.call(this, request, parent, isMain);
 };
 
-const { createLLM, formatProviderErrorMessage, isQuotaError, CURRENT_GEMINI_DEFAULT } = require('../src/llm');
+const { createLLM, consumeGeminiStream, formatProviderErrorMessage, isQuotaError, CURRENT_GEMINI_DEFAULT } = require('../src/llm');
 const { ProviderRequestError } = require('../src/provider-errors');
 
 test.after(() => {
@@ -49,6 +64,8 @@ function createCustomSettings(overrides = {}) {
 test.beforeEach(() => {
   capturedClientOptions = null;
   capturedCompletionRequest = null;
+  capturedCompletionOptions = null;
+  capturedAnthropicRequestOptions = null;
   openAICompletionError = null;
 });
 
@@ -71,6 +88,58 @@ test('routes the Custom provider through the configured OpenAI-compatible endpoi
   });
   assert.equal(capturedCompletionRequest.model, 'openclaw/default');
   assert.equal(response, 'ok');
+  assert.deepEqual(receivedTokens, ['ok']);
+});
+
+test('forwards AbortSignal to OpenAI-compatible transports and suppresses aborted tokens', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const receivedTokens = [];
+  const llm = createLLM(createCustomSettings());
+
+  await llm.stream({
+    system: '',
+    turns: [{ role: 'user', text: 'Hello' }],
+    onToken: token => receivedTokens.push(token),
+    signal: controller.signal
+  });
+
+  assert.equal(capturedCompletionOptions.signal, controller.signal);
+  assert.deepEqual(receivedTokens, []);
+});
+
+test('Gemini stream cancellation closes its iterator without emitting a late token', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let returned = 0;
+  const iterator = {
+    async next() { return { done: false, value: { text: 'late' } }; },
+    async return() { returned += 1; return { done: true }; },
+    [Symbol.asyncIterator]() { return this; }
+  };
+  const receivedTokens = [];
+
+  await assert.rejects(
+    () => consumeGeminiStream(iterator, token => receivedTokens.push(token), controller.signal),
+    error => error.category === 'cancelled' && error.retryable === false
+  );
+  assert.equal(returned, 1);
+  assert.deepEqual(receivedTokens, []);
+});
+
+test('forwards AbortSignal to Anthropic request options', async () => {
+  const controller = new AbortController();
+  const receivedTokens = [];
+  const llm = createLLM({
+    provider: 'anthropic',
+    smart: false,
+    apiKeys: { anthropic: 'test-key' },
+    models: { anthropic: { fast: 'claude-3-5-haiku-latest', smart: 'claude-3-5-haiku-latest' } }
+  });
+
+  await llm.stream({ system: '', turns: [{ role: 'user', text: 'Hello' }], onToken: token => receivedTokens.push(token), signal: controller.signal });
+
+  assert.equal(capturedAnthropicRequestOptions.signal, controller.signal);
   assert.deepEqual(receivedTokens, ['ok']);
 });
 

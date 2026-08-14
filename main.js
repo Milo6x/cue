@@ -6,6 +6,7 @@ const { captureScreenshot } = require('./src/screen');
 const { createSTT } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
 const { createLLM } = require('./src/llm');
+const { runStreamWithPolicy } = require('./src/request-policy');
 const { MODES } = require('./src/prompts');
 const { rms16 } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
@@ -68,6 +69,7 @@ let whisperModelManager = null;
 let localWhisperTranscriber = null;
 let activeWhisperModelId = null;
 let captureController = null;
+let activeAnswerController = null;
 
 // -------- streaming STT state --------
 let streamingSTT = { you: null, them: null }; // streaming STT instances per channel
@@ -501,15 +503,20 @@ async function runFeature(mode, userText) {
   if (state.busy) return;
   const def = MODES[mode];
   if (!def) return;
+  const turns = transcript.list();
+  if (!(userText || '').trim() && !def.needsScreen && turns.length === 0) {
+    send('status', { message: 'No conversation yet. Start listening and speak, or type a question.' });
+    return;
+  }
   state.busy = true;
-  let streamSettled = false; // drop stray tokens from a stream we've already abandoned
+  const answerController = new AbortController();
+  activeAnswerController = answerController;
   try {
     const settings = store.getSettings();
     const llm = createLLM(settings);
     const userBubble = def.userBubble !== null
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
-    const turns = transcript.list();
     const category = mode !== 'leetcode' ? detectCategory(turns) : null;
     send('llm:start', { userBubble, small: !!def.small, category });
 
@@ -541,37 +548,25 @@ async function runFeature(mode, userText) {
     const system = def.buildSystem ? def.buildSystem(contextBlock, settingsForPrompt.aiRules || '') : (def.system || '');
     const built = def.build({ transcript: turns, userText: userText || '' });
 
-    // Watchdog: a provider that stalls mid-stream would otherwise hang the await forever,
-    // leaving state.busy = true and wedging every later question until an app restart.
-    let watchdog = null;
-    let rearm = () => {};
-    const stalled = new Promise((_res, reject) => {
-      rearm = () => {
-        clearTimeout(watchdog);
-        watchdog = setTimeout(() => reject(new Error('the model stopped responding (timed out). Please try again.')), STREAM_INACTIVITY_MS);
-      };
-      rearm();
-    });
-    try {
-      await Promise.race([
-        llm.stream({
+    await runStreamWithPolicy({
+      operation: ({ onToken, signal }) => llm.stream({
           system,
           turns: [{ role: 'user', text: built }],
           imageDataUrl,
-          onToken: (t) => { if (streamSettled) return; rearm(); send('llm:token', { text: t }); }
+          onToken,
+          signal
         }),
-        stalled
-      ]);
-    } finally {
-      streamSettled = true;
-      clearTimeout(watchdog);
-    }
+      onToken: text => send('llm:token', { text }),
+      inactivityMs: STREAM_INACTIVITY_MS,
+      signal: answerController.signal
+    });
     send('llm:done', {});
   } catch (e) {
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
     send('llm:error', { message: e && e.message ? e.message : String(e) });
   } finally {
-    streamSettled = true;
+    if (activeAnswerController === answerController) activeAnswerController = null;
+    answerController.abort();
     state.busy = false;
   }
 }
@@ -859,6 +854,7 @@ app.on('will-quit', () => {
     whisperModelManager.cancelDownload(whisperModelManager.activeDownload.modelId);
   }
   if (localWhisperTranscriber) localWhisperTranscriber.forceStop().catch(() => {});
+  if (activeAnswerController) activeAnswerController.abort();
 });
 app.on('window-all-closed', () => app.quit());
 

@@ -56,7 +56,26 @@ function stripDataUrl(dataUrl) {
   return m ? { mime: m[1], b64: m[2] } : null;
 }
 
-async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+function emitToken(onToken, signal, token) {
+  if (!token || (signal && signal.aborted)) return false;
+  onToken(token);
+  return true;
+}
+
+function cancelledError() {
+  const error = new Error('Request was cancelled.');
+  error.name = 'AbortError';
+  error.category = 'cancelled';
+  error.retryable = false;
+  return error;
+}
+
+function throwIfAborted(signal) {
+  if (!signal || !signal.aborted) return;
+  throw cancelledError();
+}
+
+async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken, signal }) {
   const OpenAI = require('openai');
   const client = new OpenAI(baseURL ? { apiKey, baseURL } : { apiKey });
   const messages = [{ role: 'system', content: system }];
@@ -73,11 +92,11 @@ async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUr
       messages.push({ role: t.role, content: t.text });
     }
   });
-  const stream = await client.chat.completions.create({ model, messages, stream: true, max_tokens: maxTokens });
+  const stream = await client.chat.completions.create({ model, messages, stream: true, max_tokens: maxTokens }, { signal });
   let full = '';
   for await (const part of stream) {
     const d = part.choices && part.choices[0] && part.choices[0].delta && part.choices[0].delta.content;
-    if (d) { full += d; onToken(d); }
+    if (emitToken(onToken, signal, d)) full += d;
   }
   return full;
 }
@@ -93,7 +112,7 @@ function normalizeAzureBaseURL(raw) {
   return u;
 }
 
-async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, endpoint }) {
+async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, endpoint, signal }) {
   const url = normalizeAzureBaseURL(endpoint);
   if (!url) throw new Error('Missing Azure endpoint. Add your Azure AI Foundry or Azure OpenAI endpoint in Settings.');
   const messages = [{ role: 'system', content: system }];
@@ -123,16 +142,16 @@ async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxToke
     };
     client = new OpenAI({ baseURL: url, apiKey, fetch: azureFetch });
   }
-  const stream = await client.chat.completions.create({ model, messages, stream: true, max_completion_tokens: maxTokens });
+  const stream = await client.chat.completions.create({ model, messages, stream: true, max_completion_tokens: maxTokens }, { signal });
   let full = '';
   for await (const part of stream) {
     const d = part.choices && part.choices[0] && part.choices[0].delta && part.choices[0].delta.content;
-    if (d) { full += d; onToken(d); }
+    if (emitToken(onToken, signal, d)) full += d;
   }
   return full;
 }
 
-async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, signal }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey });
   const messages = turns.map((t, i) => {
@@ -146,15 +165,27 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
     }
     return { role: t.role, content: t.text };
   });
-  const stream = await client.messages.create({ model, max_tokens: maxTokens, system, messages, stream: true });
+  const stream = await client.messages.create({ model, max_tokens: maxTokens, system, messages, stream: true }, { signal });
   let full = '';
   for await (const ev of stream) {
-    if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') { full += ev.delta.text; onToken(ev.delta.text); }
+    if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta' && emitToken(onToken, signal, ev.delta.text)) full += ev.delta.text;
   }
   return full;
 }
 
-async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function consumeGeminiStream(stream, onToken, signal) {
+  let full = '';
+  for await (const chunk of stream) {
+    // @google/genai 2.12.0 exposes no public per-request AbortSignal option.
+    // Throwing inside for-await closes the iterator before this transport returns.
+    throwIfAborted(signal);
+    const text = chunk && chunk.text;
+    if (emitToken(onToken, signal, text)) full += text;
+  }
+  return full;
+}
+
+async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, signal }) {
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
   const contents = turns.map((t, i) => {
@@ -169,15 +200,10 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
   const stream = await ai.models.generateContentStream({
     model, contents, config: { systemInstruction: system, maxOutputTokens: maxTokens }
   });
-  let full = '';
-  for await (const chunk of stream) {
-    const t = chunk && chunk.text;
-    if (t) { full += t; onToken(t); }
-  }
-  return full;
+  return consumeGeminiStream(stream, onToken, signal);
 }
 
-async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, signal }) {
   const baseUrl = apiKey || 'http://localhost:11434';
   const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
 
@@ -201,9 +227,11 @@ async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTok
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: true })
+      body: JSON.stringify({ model, messages, stream: true }),
+      signal
     });
   } catch (err) {
+    if ((signal && signal.aborted) || (err && err.name === 'AbortError')) throw cancelledError();
     throw new Error(`Ollama fetch failed: ${err.message}. Is Ollama running at ${baseUrl}?`);
   }
 
@@ -215,6 +243,7 @@ async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTok
   let full = '';
   let buffer = '';
   for await (const chunk of response.body) {
+    throwIfAborted(signal);
     buffer += decoder.decode(chunk, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete line
@@ -222,22 +251,17 @@ async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTok
       if (!line.trim()) continue;
       try {
         const data = JSON.parse(line);
-        if (data.message && data.message.content) {
-          full += data.message.content;
-          onToken(data.message.content);
-        }
+        if (data.message && data.message.content && emitToken(onToken, signal, data.message.content)) full += data.message.content;
       } catch (e) {
         // ignore
       }
     }
   }
   if (buffer.trim()) {
+    throwIfAborted(signal);
     try {
       const data = JSON.parse(buffer);
-      if (data.message && data.message.content) {
-        full += data.message.content;
-        onToken(data.message.content);
-      }
+      if (data.message && data.message.content && emitToken(onToken, signal, data.message.content)) full += data.message.content;
     } catch (e) { }
   }
   return full;
@@ -312,4 +336,4 @@ function createLLM(settings) {
   };
 }
 
-module.exports = { createLLM, formatProviderErrorMessage, isQuotaError, CURRENT_GEMINI_DEFAULT };
+module.exports = { createLLM, consumeGeminiStream, formatProviderErrorMessage, isQuotaError, CURRENT_GEMINI_DEFAULT };
