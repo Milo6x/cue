@@ -34,7 +34,7 @@ test('renderer routes capture lifecycle through the coordinator, not toggle side
   assert.match(buttonHandler, /captureCoordinator\.snapshot\(\)\.session\.state/);
   assert.match(buttonHandler, /captureCoordinator\.(start|stop)\(\)/);
   assert.doesNotMatch(buttonHandler, /cue\.captureToggle|startSystemAudio\(|startMic\(|stopMic\(|stopSystemAudio\(/);
-  assert.doesNotMatch(captureStateHandler, /startMic\(|stopMic\(|stopSystemAudio\(/);
+  assert.doesNotMatch(captureStateHandler, /startMic\(|startSystemAudio\(|stopMic\(|stopSystemAudio\(/);
 });
 
 test('main serializes deterministic capture state requests', () => {
