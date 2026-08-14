@@ -3,8 +3,26 @@ const { redactSecrets } = require('./provider-errors');
 const CAPTURE_CHANNELS = new Set(['microphone', 'system']);
 const CAPTURE_STATES = new Set(['off', 'starting', 'ready', 'failed']);
 const PERMISSION_STATES = new Set(['granted', 'denied', 'restricted', 'not-determined', 'unknown']);
-const FAILURE_CATEGORIES = new Set(['authentication', 'busy', 'cancelled', 'capture', 'configuration', 'device', 'llm', 'network', 'permission', 'quota', 'service', 'stt', 'timeout', 'unknown', 'unsupported']);
-const STT_STATES = new Set(['off', 'starting', 'ready', 'connected', 'transcribing', 'stopping', 'error', 'unavailable']);
+const FAILURE_CATEGORIES = new Set(['authentication', 'busy', 'cancelled', 'capture', 'configuration', 'device', 'llm', 'model', 'network', 'permission', 'quota', 'service', 'stt', 'timeout', 'unknown', 'unsupported']);
+const STT_STATES = new Set(['off', 'starting', 'ready', 'connected', 'disconnected', 'transcribing', 'stopping', 'error', 'unavailable']);
+const FAILURE_MESSAGES = {
+  authentication: 'Provider credentials were rejected. Update provider settings and try again.',
+  busy: 'Capture is busy in another app. Close the other app and try again.',
+  cancelled: 'The operation was cancelled. Try again when you are ready.',
+  capture: 'Capture failed. Check privacy permissions and try again.',
+  configuration: 'Complete the provider settings and try again.',
+  device: 'The microphone or system-audio device is unavailable. Check the selected input and try again.',
+  llm: 'The AI request failed. Check provider settings and try again.',
+  model: 'The selected model is unavailable. Choose a current model in Settings and try again.',
+  network: 'Could not reach the provider. Check your connection and try again.',
+  permission: 'Permission was denied. Allow cue in System Settings and try again.',
+  quota: 'Provider quota is exhausted. Wait, check billing, or choose another provider.',
+  service: 'The provider service is temporarily unavailable. Try again shortly.',
+  stt: 'Transcription failed. Check the selected speech provider and try again.',
+  timeout: 'The request timed out. Try again.',
+  unknown: 'An operation failed. Check diagnostics state and try again.',
+  unsupported: 'This capture option is unavailable on this device. Check supported settings and try again.'
+};
 const UNSAFE_TEXT_RE = /\b(?:transcript|screenshot|cookie|session(?:id)?|password)\b|data:(?:audio|image)|base64/i;
 const SAFE_ID_RE = /^[A-Za-z0-9._:/-]{1,180}$/;
 const SAFE_TRACK_LABEL_RE = /^[A-Za-z0-9 ._()\-]{1,120}$/;
@@ -24,20 +42,18 @@ function safeId(value) {
   return redactSecrets(value) === value ? value : null;
 }
 
-function safeMessage(value) {
-  if (typeof value !== 'string') return null;
-  const raw = value.trim();
-  if (!raw || UNSAFE_TEXT_RE.test(raw)) return null;
-  const redacted = redactSecrets(raw)
-    .replace(/\bBearer\s+\[redacted\]/gi, '[redacted credential]')
-    .replace(/\b(?:authorization|api[-_]?key|x-(?:goog-)?api-key)\b\s*[:=]\s*(?:\[redacted\]|[^;,\r\n]*)/gi, '[redacted credential]');
-  return redacted.slice(0, 320) || null;
-}
-
 function safeTrackLabel(value) {
   if (typeof value !== 'string') return null;
   const label = value.trim();
-  return SAFE_TRACK_LABEL_RE.test(label) && !UNSAFE_TEXT_RE.test(label) ? label : null;
+  return SAFE_TRACK_LABEL_RE.test(label) && !UNSAFE_TEXT_RE.test(label) && redactSecrets(label) === label ? label : null;
+}
+
+function safeCategory(value) {
+  return FAILURE_CATEGORIES.has(value) ? value : 'unknown';
+}
+
+function safeChannel(value) {
+  return CAPTURE_CHANNELS.has(value) ? value : null;
 }
 
 function cloneSnapshot(state) {
@@ -103,25 +119,30 @@ function createDiagnosticsStore({ appVersion, platform, arch, onChange } = {}) {
     if (!CAPTURE_CHANNELS.has(channel)) return false;
     const target = state.capture[channel];
     const captureState = readOwn(value, 'state');
-    const category = readOwn(value, 'category');
-    const message = safeMessage(readOwn(value, 'message'));
     const trackLabel = safeTrackLabel(readOwn(value, 'trackLabel'));
-    if (CAPTURE_STATES.has(captureState)) target.state = captureState;
-    if (FAILURE_CATEGORIES.has(category)) target.category = category;
-    if (message !== null) target.message = message;
-    if (trackLabel !== null) target.trackLabel = trackLabel;
-    if (captureState === 'off' || captureState === 'ready') {
-      target.category = null;
-      target.message = null;
+    if (CAPTURE_STATES.has(captureState)) {
+      target.state = captureState;
+      if (captureState === 'failed') {
+        target.category = safeCategory(readOwn(value, 'category'));
+        target.message = FAILURE_MESSAGES[target.category];
+      } else {
+        target.category = null;
+        target.message = null;
+      }
     }
+    if (trackLabel !== null) target.trackLabel = trackLabel;
     emit();
     return true;
   }
 
-  function recordFailure(category, message) {
-    const safeCategory = FAILURE_CATEGORIES.has(category) ? category : 'unknown';
-    const safe = safeMessage(message) || 'An operation failed. Check diagnostics state and try again.';
-    state.lastFailure = { category: safeCategory, message: safe, at: new Date().toISOString() };
+  function recordFailure(category, _message, channel = null) {
+    const normalizedCategory = safeCategory(category);
+    state.lastFailure = {
+      category: normalizedCategory,
+      channel: safeChannel(channel),
+      message: FAILURE_MESSAGES[normalizedCategory],
+      at: new Date().toISOString()
+    };
     emit();
   }
 
@@ -152,7 +173,7 @@ function createDiagnosticsStore({ appVersion, platform, arch, onChange } = {}) {
       const category = readOwn(event, 'category');
       const message = readOwn(event, 'message');
       const updated = updateCapture(channel, { state: 'failed', category, message });
-      if (updated) recordFailure(category, message);
+      if (updated) recordFailure(category, message, channel);
       return updated;
     }
     if (type === 'failure') {
@@ -163,7 +184,10 @@ function createDiagnosticsStore({ appVersion, platform, arch, onChange } = {}) {
   }
 
   function summary() {
-    return `cue ${state.app.version} · ${state.app.platform}/${state.app.arch} · Microphone: ${state.capture.microphone.state} · System capture: ${state.capture.system.state} · Microphone permission: ${state.permissions.microphone} · Screen permission: ${state.permissions.screen} · Chat: ${state.chat.ready ? 'ready' : 'not ready'} · Transcription: ${state.stt.state}`;
+    const failure = state.lastFailure
+      ? `Last failure: ${state.lastFailure.category}${state.lastFailure.channel ? ` (${state.lastFailure.channel})` : ''}`
+      : 'Last failure: none';
+    return `cue ${state.app.version} · ${state.app.platform}/${state.app.arch} · Microphone: ${state.capture.microphone.state} · System capture: ${state.capture.system.state} · Microphone permission: ${state.permissions.microphone} · Screen permission: ${state.permissions.screen} · Chat: ${state.chat.ready ? 'ready' : 'not ready'} · Transcription: ${state.stt.state} · ${failure}`;
   }
 
   return {

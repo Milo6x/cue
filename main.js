@@ -582,6 +582,7 @@ async function runFeature(mode, userText) {
 
     if (!llm.ready) {
       const message = llm.configurationError || ('Complete the ' + settings.provider + ' provider settings. Model: ' + (llm.model || 'unset') + '.');
+      recordDiagnosticsFailure('configuration', new Error(message));
       send('llm:error', { message });
       return;
     }

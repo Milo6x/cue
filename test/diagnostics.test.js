@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
 const { createDiagnosticsStore } = require('../src/diagnostics');
@@ -43,7 +45,7 @@ test('only accepts allowlisted renderer diagnostics fields and never retains nes
   assert.deepEqual(snapshot.capture.microphone, {
     state: 'failed',
     category: 'permission',
-    message: 'Allow microphone access.',
+    message: 'Permission was denied. Allow cue in System Settings and try again.',
     trackLabel: 'Built-in Microphone'
   });
   const serialized = JSON.stringify(snapshot);
@@ -72,7 +74,7 @@ test('maps only the two explicit capture channels from a renderer coordinator sn
 
   assert.deepEqual(diagnostics.snapshot().capture, {
     microphone: { state: 'ready', category: null, message: null, trackLabel: 'MacBook Microphone' },
-    system: { state: 'failed', category: 'permission', message: 'Allow Screen & System Audio Recording.', trackLabel: null }
+    system: { state: 'failed', category: 'permission', message: 'Permission was denied. Allow cue in System Settings and try again.', trackLabel: null }
   });
   assert.doesNotMatch(JSON.stringify(diagnostics.snapshot()), /transcript|private|data:image|data:audio|screenshot|apikey/i);
 });
@@ -85,7 +87,7 @@ test('redacts and rejects unsafe failure text without exposing mutable internal 
   const huge = 'x'.repeat(20_000);
 
   assert.equal(diagnostics.report({ type: 'failure', category: 'network', message: huge }), true);
-  assert.equal(diagnostics.snapshot().lastFailure.message.length, 320);
+  assert.equal(diagnostics.snapshot().lastFailure.message, 'Could not reach the provider. Check your connection and try again.');
   assert.equal(diagnostics.report({ type: 'failure', category: 'network', message: 'Request failed: Bearer token-value; api_key=sk-private' }), true);
   assert.equal(diagnostics.report({ type: 'failure', category: 'network', message: `transcript: ${huge}` }), true);
   const beforeMutation = diagnostics.snapshot();
@@ -94,7 +96,7 @@ test('redacts and rejects unsafe failure text without exposing mutable internal 
   const afterMutation = diagnostics.snapshot();
 
   assert.equal(afterMutation.capture.microphone.state, 'off');
-  assert.equal(afterMutation.lastFailure.message, 'An operation failed. Check diagnostics state and try again.');
+  assert.equal(afterMutation.lastFailure.message, 'Could not reach the provider. Check your connection and try again.');
   assert.doesNotMatch(afterMutation.lastFailure.message, /token-value|sk-private|api_key/i);
   assert.ok(afterMutation.lastFailure.at);
   assert.ok(changes.length >= 1);
@@ -122,4 +124,75 @@ test('does not expose credential-shaped identifiers as provider or model state',
 
   assert.deepEqual(diagnostics.snapshot().chat, { provider: 'openai', model: null, ready: true });
   assert.deepEqual(diagnostics.snapshot().stt, { provider: null, state: 'ready' });
+});
+
+test('does not expose a credential-shaped renderer track label', () => {
+  const diagnostics = createDiagnosticsStore({ appVersion: '1.0.0', platform: 'darwin', arch: 'arm64' });
+
+  diagnostics.report({ type: 'capture', channel: 'microphone', state: 'ready', trackLabel: 'sk-private-track-label' });
+
+  assert.equal(diagnostics.snapshot().capture.microphone.trackLabel, null);
+});
+
+test('normalizes renderer failure detail to a fixed category recovery message', () => {
+  const diagnostics = createDiagnosticsStore({ appVersion: '1.0.0', platform: 'darwin', arch: 'arm64' });
+  const payloads = [
+    'X-Custom-Token: private-random-value',
+    'x-auth-token=private-random-value',
+    'access_token=private-random-value',
+    'client_secret=private-random-value',
+    'private sentence that did not come from cue\n\u0000\u001b[31m'
+  ];
+
+  for (const message of payloads) {
+    diagnostics.report({ type: 'failure', category: 'network', message });
+    const lastFailure = diagnostics.snapshot().lastFailure;
+    assert.equal(lastFailure.message, 'Could not reach the provider. Check your connection and try again.');
+    assert.doesNotMatch(JSON.stringify(lastFailure), /private-random-value|x-custom-token|x-auth-token|access_token|client_secret|\u001b/i);
+  }
+});
+
+test('retains an allowlisted capture channel with the last categorized failure and summary', () => {
+  const diagnostics = createDiagnosticsStore({ appVersion: '1.0.0', platform: 'darwin', arch: 'arm64' });
+
+  assert.equal(diagnostics.report({
+    type: 'capture-channel-ended',
+    channel: 'microphone',
+    category: 'device',
+    message: 'private track data'
+  }), true);
+  const { snapshot, summary } = diagnostics.read();
+
+  assert.deepEqual(snapshot.lastFailure, {
+    category: 'device',
+    channel: 'microphone',
+    message: 'The microphone or system-audio device is unavailable. Check the selected input and try again.',
+    at: snapshot.lastFailure.at
+  });
+  assert.match(summary, /Last failure: device \(microphone\)/);
+  assert.doesNotMatch(JSON.stringify(snapshot), /private track data/);
+  assert.equal(diagnostics.report({ type: 'capture-channel-ended', channel: '__proto__', category: 'device' }), false);
+});
+
+test('preserves provider model category and disconnected STT state', () => {
+  const diagnostics = createDiagnosticsStore({ appVersion: '1.0.0', platform: 'darwin', arch: 'arm64' });
+
+  diagnostics.recordFailure('model', 'arbitrary private model error');
+  diagnostics.updateProviders({ stt: { provider: 'openai-realtime', state: 'disconnected' } });
+
+  assert.equal(diagnostics.snapshot().lastFailure.category, 'model');
+  assert.equal(diagnostics.snapshot().lastFailure.message, 'The selected model is unavailable. Choose a current model in Settings and try again.');
+  assert.deepEqual(diagnostics.snapshot().stt, { provider: 'openai-realtime', state: 'disconnected' });
+});
+
+test('main records an unready LLM as a diagnostics configuration failure before returning', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const start = main.indexOf('if (!llm.ready) {');
+  const end = main.indexOf('\n    let imageDataUrl', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const block = main.slice(start, end);
+
+  assert.match(block, /recordDiagnosticsFailure\('configuration', new Error\(message\)\)/);
+  assert.ok(block.indexOf("recordDiagnosticsFailure('configuration'") < block.indexOf("send('llm:error'"));
 });
