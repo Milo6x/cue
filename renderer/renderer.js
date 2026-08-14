@@ -635,6 +635,7 @@
   }
 
   let sttState = 'disconnected';
+  let captureActive = false;
 
   function updateSttStatus({ active, streaming } = {}) {
     const label = document.getElementById('stt-status');
@@ -788,6 +789,8 @@
 
   // ---- events from main --------------------------------------------------
   cue.on('capture:state', ({ active, streaming, mode }) => {
+    captureActive = active === true;
+    if (active === false) clearInterimDisplay();
     if (active && mode === 'local') {
       sttState = 'local';
       const label = document.getElementById('stt-status');
@@ -816,20 +819,35 @@
     }
     return interimEl;
   }
+  function clearInterimDisplay() {
+    if (interimEl) {
+      interimEl.textContent = '';
+      interimEl.classList.remove('show');
+    }
+    clearTranscriptInterim();
+    if (tsSidebarInterimEl) {
+      tsSidebarInterimEl.remove();
+      tsSidebarInterimEl = null;
+    }
+  }
   cue.on('stt:interim', ({ channel, text }) => {
+    const interimText = typeof text === 'string' ? text.trim() : '';
+    if (!captureActive || !interimText) {
+      clearInterimDisplay();
+      setLiveDotState(captureActive ? 'idle' : 'off');
+      return;
+    }
     setLiveDotState('transcribing');
     const el = getOrCreateInterimEl();
     const label = channel === 'them' ? 'Them' : 'You';
-    el.textContent = `${label}: ${text}`;
+    el.textContent = `${label}: ${interimText}`;
     el.classList.add('show');
-    appendTranscriptHistoryTurn(channel, text, true); // update sidebar interim
+    appendTranscriptHistoryTurn(channel, interimText, true); // update sidebar interim
     
   });
   cue.on('stt:final', ({ channel, text }) => {
     setLiveDotState('idle');
-    // Clear interim when we get a final
-    if (interimEl) { interimEl.textContent = ''; interimEl.classList.remove('show'); }
-    clearTranscriptInterim();
+    clearInterimDisplay();
     // sidebar: the final turn is added via the 'transcript' event below
   });
   cue.on('stt:status', ({ channel, status, provider }) => {

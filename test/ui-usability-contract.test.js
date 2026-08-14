@@ -97,3 +97,21 @@ test('manual composer has no obsolete speech auto-fill state or custom undo inte
   assert.doesNotMatch(styles, obsoleteComposerClass);
   assert.doesNotMatch(renderer, /\(e\.metaKey \|\| e\.ctrlKey\)[\s\S]{0,100}e\.key === 'z'/);
 });
+
+test('blank interim speech and inactive capture clear every interim surface', () => {
+  const renderer = read('renderer/renderer.js');
+  const captureState = section(renderer, "  cue.on('capture:state'", '  // ---- real-time transcript display');
+  const interimHandler = section(renderer, "  cue.on('stt:interim'", "  cue.on('stt:final'");
+  const clearInterim = section(renderer, '  let interimEl = null;', "  cue.on('stt:interim'");
+
+  assert.match(interimHandler, /const interimText = typeof text === 'string' \? text\.trim\(\) : '';/);
+  assert.match(interimHandler, /if \(!captureActive \|\| !interimText\) \{\s*clearInterimDisplay\(\);\s*setLiveDotState\(captureActive \? 'idle' : 'off'\);\s*return;/);
+  assert.ok(interimHandler.indexOf('if (!captureActive || !interimText)') < interimHandler.indexOf('getOrCreateInterimEl()'), 'inactive/blank guard must run before creating the floating row');
+  assert.match(captureState, /captureActive = active === true;/);
+  assert.match(captureState, /if \(active === false\) clearInterimDisplay\(\);/);
+  assert.match(clearInterim, /function clearInterimDisplay\(\)/);
+  assert.match(clearInterim, /interimEl\.textContent = ''/);
+  assert.match(clearInterim, /interimEl\.classList\.remove\('show'\)/);
+  assert.match(clearInterim, /tsSidebarInterimEl\.remove\(\)/);
+  assert.match(clearInterim, /tsSidebarInterimEl = null/);
+});
