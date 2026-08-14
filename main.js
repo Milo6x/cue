@@ -55,7 +55,7 @@ const WIN_BUILD = getWindowsBuild();
 const WIN_SUPPORTS_CONTENT_PROTECTION = !isWindows || WIN_BUILD >= 19041;
 // Protection is on unless a developer explicitly starts cue with CUE_NO_PROTECT.
 // On older Windows builds the OS cannot enforce it; the renderer receives that fact.
-let contentProtectionEnabled = !process.env.CUE_NO_PROTECT;
+let contentProtectionEnabled = process.env.CUE_NO_PROTECT !== '1';
 
 function contentProtectionSnapshot() {
   let enabled = contentProtectionEnabled && WIN_SUPPORTS_CONTENT_PROTECTION;

@@ -94,6 +94,7 @@ html, body {
 .drag-label { color: rgba(255,255,255,0.9); }
 .tb-divider { width: 1px; height: 20px; background: rgba(255,255,255,0.10); margin: 0 2px; }
 #toolbar button { border: none; background: transparent; color: #fff; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: background 140ms ease, transform 140ms ease; }
+#toolbar button:focus-visible { outline: 2px solid #9dc0ff; outline-offset: 2px; }
 .tb-logo { width: 28px; height: 28px; border-radius: 50%; background: rgba(255,255,255,0.06) !important; }
 .tb-logo:hover { background: rgba(255,255,255,0.12) !important; }
 .tb-hide { gap: 6px; padding: 5px 12px 5px 10px; border-radius: var(--r-pill); font-size: 13px; font-weight: 500; }
@@ -284,117 +285,11 @@ button:focus { outline: none; }
   pointer-events: none;
 }
 
-/* FIX #9: Send button ready state */
-#send-btn.ready {
-  background: var(--live);
-  box-shadow: 0 2px 12px rgba(34,197,94,0.5);
-}
-#send-btn.has-text:not(.ready) {
-  background: var(--accent);
-}
-
-/* FIX #12: Interim text in input area — positioned relative to composer */
-.input-interim {
-  display: none;
-  position: absolute;
-  top: -28px;
-  left: 12px;
-  right: 12px;
-  padding: 4px 8px;
-  font-size: 12px;
-  font-style: italic;
-  color: rgba(255,255,255,0.4);
-  background: rgba(34,197,94,0.08);
-  border-radius: 6px 6px 0 0;
-  border: 1px solid rgba(34,197,94,0.15);
-  border-bottom: none;
-  pointer-events: none;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  z-index: 5;
-}
-
-/* FIX #14: History badge */
-.history-badge {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 4px;
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 14px;
-  text-align: center;
-  color: #fff;
-  background: var(--accent);
-  border-radius: 7px;
-  pointer-events: none;
-}
-.history-btn { position: relative; }
-.history-btn.listening .history-badge { background: var(--live); }
-
-/* STT auto-fill states — visual feedback for question readiness */
-
-/* Base filling state: subtle green border when accumulating interviewer speech */
-#composer.stt-filling {
-  border-color: rgba(34,197,94,0.45);
-  box-shadow: 0 0 0 2px rgba(34,197,94,0.12);
-}
-#composer.stt-filling #input { color: rgba(200,255,220,0.95); }
-
-/* Accumulating state: pulsing border to show text is still coming in */
-#composer.stt-accumulating {
-  border-color: rgba(34,197,94,0.35);
-  box-shadow: 0 0 0 2px rgba(34,197,94,0.08);
-  animation: stt-pulse 1.5s ease-in-out infinite;
-}
-
-/* Ready state: solid green, question looks complete */
-#composer.stt-ready {
-  border-color: rgba(34,197,94,0.6);
-  box-shadow: 0 0 0 3px rgba(34,197,94,0.18), 0 0 12px rgba(34,197,94,0.15);
-}
-#composer.stt-ready #input { color: rgba(180,255,200,1); }
-
-/* Ready indicator bar at bottom of composer */
-#composer.stt-ready::after {
-  content: '↵ Ready to answer';
-  position: absolute;
-  bottom: -20px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 10px;
-  font-weight: 600;
-  color: rgba(34,197,94,0.8);
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-  pointer-events: none;
-}
-
-/* Dimmed state: user is speaking, might clear soon */
-#composer.stt-dimmed {
-  border-color: rgba(255,255,255,0.15);
-  box-shadow: none;
-  opacity: 0.6;
-}
-#composer.stt-dimmed #input { color: rgba(255,255,255,0.5); }
-
-@keyframes stt-pulse {
-  0%, 100% { 
-    border-color: rgba(34,197,94,0.35);
-    box-shadow: 0 0 0 2px rgba(34,197,94,0.08);
-  }
-  50% { 
-    border-color: rgba(34,197,94,0.55);
-    box-shadow: 0 0 0 3px rgba(34,197,94,0.15);
-  }
-}
+#send-btn.has-text { background: var(--accent); }
 #composer {
-  position: relative; /* for ::after indicator */
+  position: relative;
   margin-top: 14px;
-  margin-bottom: 22px; /* space for ready indicator */
+  margin-bottom: 12px;
   background: var(--fill-1);
   border: 1px solid rgba(255,255,255,0.10);
   border-radius: var(--r-16);

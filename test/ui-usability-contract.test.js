@@ -49,7 +49,8 @@ test('content protection defaults on and can only be changed through a sender-va
   const main = read('main.js');
   const preload = read('preload.js');
 
-  assert.match(main, /let contentProtectionEnabled\s*=\s*!process\.env\.CUE_NO_PROTECT/);
+  assert.match(main, /let contentProtectionEnabled\s*=\s*process\.env\.CUE_NO_PROTECT\s*!==\s*'1'/);
+  assert.doesNotMatch(main, /contentProtectionEnabled\s*=\s*!process\.env\.CUE_NO_PROTECT/);
   assert.match(main, /function isCueRenderer\(event\)/);
   assert.match(main, /ipcMain\.handle\('content-protection:get', \(event\) => \{\s*assertCueRenderer\(event\)/);
   assert.match(main, /ipcMain\.handle\('content-protection:set', \(event, enabled\) => \{\s*assertCueRenderer\(event\)/);
@@ -59,4 +60,23 @@ test('content protection defaults on and can only be changed through a sender-va
   assert.match(preload, /contentProtectionGet:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('content-protection:get'\)/);
   assert.match(preload, /contentProtectionSet:\s*\(enabled\)\s*=>\s*ipcRenderer\.invoke\('content-protection:set', !!enabled\)/);
   assert.match(preload, /allowed\s*=\s*\[[\s\S]*?'content-protection:changed'/);
+});
+
+test('toolbar buttons retain a visible keyboard focus indicator', () => {
+  const styles = read('renderer/styles.css');
+
+  assert.match(styles, /#toolbar button:focus-visible\s*\{[^}]*outline:\s*2px solid/);
+  assert.match(styles, /#toolbar button:focus-visible\s*\{[^}]*outline-offset:\s*2px/);
+});
+
+test('manual composer has no obsolete speech auto-fill state or custom undo interception', () => {
+  const renderer = read('renderer/renderer.js');
+  const styles = read('renderer/styles.css');
+  const obsoleteRendererState = /inputFromSTT|sttFillTimer|questionFinalizeTimer|softClearTimer|userSpeechStart|lastSTTValue|saveToQuestionHistory|restoreLastQuestion|hardClearSTTFill|cancelSoftClear/;
+  const obsoleteComposerClass = /stt-filling|stt-ready|stt-accumulating|stt-dimmed/;
+
+  assert.doesNotMatch(renderer, obsoleteRendererState);
+  assert.doesNotMatch(renderer, obsoleteComposerClass);
+  assert.doesNotMatch(styles, obsoleteComposerClass);
+  assert.doesNotMatch(renderer, /\(e\.metaKey \|\| e\.ctrlKey\)[\s\S]{0,100}e\.key === 'z'/);
 });
