@@ -94,6 +94,10 @@ test('keeps unknown errors non-retryable and redacts secrets without hiding usef
   const lineDelimitedHeader = redactSecrets('authorization: Token abc def\nUseful surrounding text');
   assert.doesNotMatch(lineDelimitedHeader, /Token|abc|def/);
   assert.match(lineDelimitedHeader, /Useful surrounding text/);
+  const assignmentHeader = redactSecrets('Authorization = Token opaque secret value; next=safe');
+  assert.doesNotMatch(assignmentHeader, /Token|opaque|secret|value/);
+  assert.match(assignmentHeader, /next=safe/);
+  assert.doesNotMatch(redactSecrets('authorization = Basic lower-case secret'), /Basic|lower-case|secret/);
   assert.doesNotMatch(redactSecrets('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature-value'), /eyJhbGciOiJIUzI1NiJ9/);
 });
 
