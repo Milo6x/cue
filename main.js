@@ -26,6 +26,7 @@ const { WhisperModelManager } = require('./src/whisper-model-manager');
 const { requireWhisperModel } = require('./src/whisper-model-catalog');
 const { locateWhisperRuntime } = require('./src/whisper-runtime');
 const { LocalWhisperTranscriber } = require('./src/local-whisper-transcriber');
+const { createTranscriptLedger } = require('./src/transcript-ledger');
 
 let win = null;
 let remoteStopSeq = 0;
@@ -56,8 +57,8 @@ let permWin = null;
 const state = { capturing: false, busy: false, transcribing: { you: false, them: false } };
 let sttDisabled = false; // set when the key can't reach any speech model (stops retry spam)
 const buffers = { you: [], them: [] };
-const transcript = []; // { channel, text, ts } — capped at MAX_TRANSCRIPT_TURNS
 const MAX_TRANSCRIPT_TURNS = 200; // ~30–40 minutes of conversation at normal pace
+const transcript = createTranscriptLedger({ maxTurns: MAX_TRANSCRIPT_TURNS });
 const FLUSH_MS = 900;
 const STREAM_INACTIVITY_MS = 25000; // abort a stalled LLM stream so state.busy can't wedge forever
 const MIN_BYTES = Math.floor(16000 * 2 * 0.12); // ~0.12s
@@ -92,11 +93,6 @@ const ringBuffers = {
   you: new AudioRingBuffer(300, 16000),
   them: new AudioRingBuffer(300, 16000)
 };
-
-function pushTranscript(turn) {
-  transcript.push(turn);
-  if (transcript.length > MAX_TRANSCRIPT_TURNS) transcript.splice(0, transcript.length - MAX_TRANSCRIPT_TURNS);
-}
 
 function send(channel, data) { if (win && !win.isDestroyed()) win.webContents.send(channel, data); }
 
@@ -133,11 +129,11 @@ function getWhisperRuntime() {
 }
 
 function publishTranscript(channel, text) {
-  if (!text || !text.trim()) return;
-  const turn = { channel, text: text.trim(), ts: Date.now() };
-  pushTranscript(turn);
+  const turn = transcript.append(channel, text);
+  if (!turn) return null;
   send('transcript', turn);
-  send('stt:final', { channel, text: turn.text });
+  send('stt:final', { channel: turn.channel, text: turn.text, ts: turn.ts, seq: turn.seq });
+  return turn;
 }
 
 async function startLocalWhisper(settings) {
@@ -319,11 +315,7 @@ async function flushChannel(channel) {
       handleSttError(res.error, settings);
       return;
     }
-    if (res.text && res.text.trim() && res.text.trim().length > 1 && !/^[?!.,;:\-…]+$/.test(res.text.trim())) {
-      const turn = { channel, text: res.text.trim(), ts: Date.now() };
-      pushTranscript(turn);
-      send('transcript', turn);
-    }
+    publishTranscript(channel, res.text);
   } catch (e) {
     console.log('[stt] error', e && e.message);
     recordEvent({ level: 'error', event: 'stt_failed', msg: e && e.message ? e.message : String(e), frame: 'flushChannel', context: { channel } });
@@ -369,10 +361,7 @@ function initStreamingSTT() {
   ['you', 'them'].forEach((channel) => {
     const sttInstance = createStreamingSTT(settings, channel, {
       onTranscript: (ch, text) => {
-        const turn = { channel: ch, text, ts: Date.now() };
-        pushTranscript(turn);
-        send('transcript', turn);
-        send('stt:final', { channel: ch, text });
+        publishTranscript(ch, text);
       },
       onInterim: (ch, text) => {
         send('stt:interim', { channel: ch, text });
@@ -520,7 +509,8 @@ async function runFeature(mode, userText) {
     const userBubble = def.userBubble !== null
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
-    const category = mode !== 'leetcode' ? detectCategory(transcript) : null;
+    const turns = transcript.list();
+    const category = mode !== 'leetcode' ? detectCategory(turns) : null;
     send('llm:start', { userBubble, small: !!def.small, category });
 
     if (!llm.ready) {
@@ -547,9 +537,9 @@ async function runFeature(mode, userText) {
     }
 
     const settingsForPrompt = store.getSettings();
-    const contextBlock = buildInterviewContext(settingsForPrompt, mode, transcript);
+    const contextBlock = buildInterviewContext(settingsForPrompt, mode, turns);
     const system = def.buildSystem ? def.buildSystem(contextBlock, settingsForPrompt.aiRules || '') : (def.system || '');
-    const built = def.build({ transcript, userText: userText || '' });
+    const built = def.build({ transcript: turns, userText: userText || '' });
 
     // Watchdog: a provider that stalls mid-stream would otherwise hang the await forever,
     // leaving state.busy = true and wedging every later question until an app restart.
@@ -653,7 +643,7 @@ ipcMain.handle('platform:info', () => ({
   winSupportsContentProtection: WIN_SUPPORTS_CONTENT_PROTECTION
 }));
 ipcMain.handle('transcript:clear', () => {
-  transcript.splice(0, transcript.length);
+  transcript.clear();
   return { ok: true };
 });
 ipcMain.on('ask', (_e, payload) => runFeature(payload.mode, payload.text));
@@ -821,7 +811,7 @@ function launchApp() {
   startAppLink({
     snapshot: () => ({
       state,
-      transcript,
+      transcript: transcript.list(),
       settings: store.getSettings(),
       sttDisabled,
       shortcuts: { ...shortcutState },
