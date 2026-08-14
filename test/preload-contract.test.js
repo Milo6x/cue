@@ -41,8 +41,10 @@ test('renderer routes capture lifecycle through the coordinator, not toggle side
   assert.doesNotMatch(captureStateHandler, /startMic\(|startSystemAudio\(|stopMic\(|stopSystemAudio\(/);
   assert.match(micEndedHandler, /captureFailure\('microphone', error\)/);
   assert.doesNotMatch(micEndedHandler, /stopMic\(/);
+  assert.match(micEndedHandler, /Listening continues on any remaining source\. Stop, then start listening to reconnect the microphone\./);
   assert.match(systemEndedHandler, /captureFailure\('system', error\)/);
   assert.doesNotMatch(systemEndedHandler, /stopSystemAudio\(/);
+  assert.match(systemEndedHandler, /Listening continues on any remaining source\. Stop, then start listening to reconnect meeting audio\./);
   assert.match(renderer, /cue\.on\('capture:remote-stop', async \(\{ id \}\) => \{[\s\S]{0,500}await captureCoordinator\.stop\(\)[\s\S]{0,500}await cue\.captureSet\(false\)[\s\S]{0,500}cue\.captureRemoteStopAck\(id, \{ stopped: true \}\)/);
   assert.match(read('renderer/index.html'), /<script src="capture-status-tracker\.js"><\/script>\s*<script src="renderer\.js"><\/script>/);
 });

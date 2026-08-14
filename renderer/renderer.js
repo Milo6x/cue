@@ -697,7 +697,7 @@
         throw captureError('device', 'No microphone audio track was available. Select a working default microphone in System Settings, then try again.');
       }
       micTrackEnded = () => {
-        const error = captureError('device', 'Your microphone connection ended. Check your default microphone and try again.');
+        const error = captureError('device', 'Your microphone connection ended. Listening continues on any remaining source. Stop, then start listening to reconnect the microphone.');
         void captureFailure('microphone', error);
       };
       if (micTrack.addEventListener) micTrack.addEventListener('ended', micTrackEnded, { once: true });
@@ -786,7 +786,7 @@
         throw captureError('unsupported', 'No system-audio track was available. Meeting audio capture needs macOS 14.4+; make sure audio sharing is enabled, then try again.');
       }
       sysTrackEnded = () => {
-        const error = captureError('device', 'Your meeting-audio connection ended. Start listening again to reconnect it.');
+        const error = captureError('device', 'Your meeting-audio connection ended. Listening continues on any remaining source. Stop, then start listening to reconnect meeting audio.');
         void captureFailure('system', error);
       };
       if (sysTrack.addEventListener) sysTrack.addEventListener('ended', sysTrackEnded, { once: true });
