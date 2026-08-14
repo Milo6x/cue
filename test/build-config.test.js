@@ -4,6 +4,25 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const pkg = require('../package.json');
+const signingEnvironmentKeys = ['MAC_SIGN', 'APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID'];
+
+function loadBuilderWithSigningEnvironment(overrides) {
+  const previous = Object.fromEntries(signingEnvironmentKeys.map((key) => [key, process.env[key]]));
+  try {
+    for (const key of signingEnvironmentKeys) {
+      if (overrides[key] === undefined) delete process.env[key];
+      else process.env[key] = overrides[key];
+    }
+    delete require.cache[require.resolve('../electron-builder.cjs')];
+    return require('../electron-builder.cjs');
+  } finally {
+    delete require.cache[require.resolve('../electron-builder.cjs')];
+    for (const key of signingEnvironmentKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+}
 
 // Regression test for the actual incident behind the "cue is damaged and
 // can't be opened" bug reports: package.json used to carry its own legacy
@@ -31,39 +50,33 @@ test('package exposes the macOS application verifier', () => {
 });
 
 test('mac config never auto-publishes and only claims hardened runtime / notarization with a real cert', () => {
-  const original = { ...process.env };
-  try {
-    delete require.cache[require.resolve('../electron-builder.cjs')];
-    delete process.env.MAC_SIGN;
-    delete process.env.APPLE_ID;
-    delete process.env.APPLE_APP_SPECIFIC_PASSWORD;
-    delete process.env.APPLE_TEAM_ID;
-    const unsigned = require('../electron-builder.cjs');
+  const unsigned = loadBuilderWithSigningEnvironment({});
 
-    // publish:null is what stops electron-builder auto-publishing an
-    // ad-hoc build over a real release asset just because GH_TOKEN is set.
-    assert.equal(unsigned.publish, null);
-    // No cert -> must not claim hardened runtime or notarization (would
-    // otherwise fail the build outright, or worse, silently no-op).
-    assert.equal(unsigned.mac.identity, '-');
-    assert.equal(unsigned.mac.hardenedRuntime, false);
-    assert.equal(unsigned.mac.notarize, false);
+  // publish:null is what stops electron-builder auto-publishing an
+  // ad-hoc build over a real release asset just because GH_TOKEN is set.
+  assert.equal(unsigned.publish, null);
+  // No cert -> must not claim hardened runtime or notarization (would
+  // otherwise fail the build outright, or worse, silently no-op).
+  assert.equal(unsigned.mac.identity, '-');
+  assert.equal(unsigned.mac.hardenedRuntime, false);
+  assert.equal(unsigned.mac.notarize, false);
 
-    delete require.cache[require.resolve('../electron-builder.cjs')];
-    process.env.MAC_SIGN = '1';
-    process.env.APPLE_ID = 'dev@example.com';
-    process.env.APPLE_APP_SPECIFIC_PASSWORD = 'app-specific-password';
-    process.env.APPLE_TEAM_ID = 'TEAMID1234';
-    const signed = require('../electron-builder.cjs');
+  const signedWithoutNotarizationCredentials = loadBuilderWithSigningEnvironment({ MAC_SIGN: '1' });
+  assert.equal(signedWithoutNotarizationCredentials.publish, null);
+  assert.equal(signedWithoutNotarizationCredentials.mac.identity, undefined);
+  assert.equal(signedWithoutNotarizationCredentials.mac.hardenedRuntime, true);
+  assert.equal(signedWithoutNotarizationCredentials.mac.notarize, false);
 
-    assert.equal(signed.publish, null);
-    assert.equal(signed.mac.identity, undefined); // let electron-builder discover the keychain identity
-    assert.equal(signed.mac.hardenedRuntime, true);
-    assert.equal(signed.mac.notarize, true);
-  } finally {
-    process.env = original;
-    delete require.cache[require.resolve('../electron-builder.cjs')];
-  }
+  const signed = loadBuilderWithSigningEnvironment({
+    MAC_SIGN: '1',
+    APPLE_ID: 'dev@example.com',
+    APPLE_APP_SPECIFIC_PASSWORD: 'app-specific-password',
+    APPLE_TEAM_ID: 'TEAMID1234',
+  });
+  assert.equal(signed.publish, null);
+  assert.equal(signed.mac.identity, undefined); // let electron-builder discover the keychain identity
+  assert.equal(signed.mac.hardenedRuntime, true);
+  assert.equal(signed.mac.notarize, true);
 });
 
 test('mac config ships the zip target with entitlements files that exist on disk', () => {

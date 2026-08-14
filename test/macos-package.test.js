@@ -66,6 +66,8 @@ test('macOS package verifier accepts a signed arm64 Cue app with all reliability
   const result = verify(fixture.appPath);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Verified macOS app:/);
+  assert.match(result.stdout, /signature: ad-hoc/);
+  assert.match(result.stdout, /does not prove notarization or Gatekeeper distribution/);
 });
 
 test('macOS package verifier names a missing reliability module', (t) => {

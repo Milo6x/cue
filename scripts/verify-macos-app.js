@@ -79,6 +79,13 @@ function isExecutableFile(filePath) {
   }
 }
 
+function describeSignature(signature) {
+  if (/^Signature=adhoc$/m.test(signature)) return 'ad-hoc';
+  const authority = signature.match(/^Authority=(.+)$/m);
+  if (authority) return `certificate (${authority[1]})`;
+  fail('code signature has no recognizable signing identity or ad-hoc signature');
+}
+
 function findMissingModules(resourcesPath) {
   const appPath = path.join(resourcesPath, 'app');
   const archivePath = path.join(resourcesPath, 'app.asar');
@@ -156,18 +163,17 @@ function verifyMacApp(appPath) {
 
   run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', resolvedApp]);
   const signature = run('codesign', ['--display', '--verbose=4', resolvedApp]);
-  if (!/(?:^|\n)(?:Signature=adhoc|Authority=|TeamIdentifier=)/m.test(signature)) {
-    fail('code signature has no recognizable signing identity or ad-hoc signature');
-  }
+  const signatureKind = describeSignature(signature);
 
-  return { appPath: resolvedApp, architectures };
+  return { appPath: resolvedApp, architectures, signatureKind };
 }
 
 function main() {
   const target = process.argv[2] || 'dist/mac-arm64/cue.app';
   try {
     const result = verifyMacApp(target);
-    console.log(`Verified macOS app: ${result.appPath} (architectures: ${result.architectures.join(', ')})`);
+    console.log(`Verified macOS app: ${result.appPath} (architectures: ${result.architectures.join(', ')}, signature: ${result.signatureKind})`);
+    console.log('Bundle integrity verification does not prove notarization or Gatekeeper distribution.');
   } catch (error) {
     console.error(`macOS app verification failed: ${error.message}`);
     process.exitCode = 1;
