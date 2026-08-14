@@ -90,6 +90,10 @@ test('keeps unknown errors non-retryable and redacts secrets without hiding usef
   assert.doesNotMatch(redactSecrets('AIzaSyA-secret-value'), /AIzaSyA-secret-value/);
   assert.doesNotMatch(redactSecrets('{"Authorization":"top-secret-value","api-key":"header-key-value"}'), /top-secret-value|header-key-value/);
   assert.doesNotMatch(redactSecrets("{'Authorization':'single-secret-value','api_key':'json-key-value'}"), /single-secret-value|json-key-value/);
+  assert.doesNotMatch(redactSecrets('Authorization: Basic dXNlcjpwYXNz'), /Basic|dXNlcjpwYXNz/);
+  const lineDelimitedHeader = redactSecrets('authorization: Token abc def\nUseful surrounding text');
+  assert.doesNotMatch(lineDelimitedHeader, /Token|abc|def/);
+  assert.match(lineDelimitedHeader, /Useful surrounding text/);
   assert.doesNotMatch(redactSecrets('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature-value'), /eyJhbGciOiJIUzI1NiJ9/);
 });
 

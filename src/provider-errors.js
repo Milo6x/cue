@@ -22,6 +22,7 @@ function redactSecrets(value) {
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted token]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
     .replace(/(["'](?:authorization|api[-_]key)["']\s*:\s*["'])[^"']*(["'])/gi, '$1[redacted]$2')
+    .replace(/(\bauthorization\s*:\s*)(?!["'])[^;\r\n]*/gi, '$1[redacted]')
     .replace(/((?:api[-_]key|authorization)\s*[=:]\s*["']?)[^\s,"'}\]]+/gi, '$1[redacted]');
 }
 
