@@ -28,6 +28,7 @@ const { requireWhisperModel } = require('./src/whisper-model-catalog');
 const { locateWhisperRuntime } = require('./src/whisper-runtime');
 const { LocalWhisperTranscriber } = require('./src/local-whisper-transcriber');
 const { createTranscriptLedger } = require('./src/transcript-ledger');
+const { createDiagnosticsStore } = require('./src/diagnostics');
 
 let win = null;
 let remoteStopSeq = 0;
@@ -70,6 +71,7 @@ let localWhisperTranscriber = null;
 let activeWhisperModelId = null;
 let captureController = null;
 let activeAnswerController = null;
+let diagnostics = null;
 
 // -------- streaming STT state --------
 let streamingSTT = { you: null, them: null }; // streaming STT instances per channel
@@ -97,6 +99,27 @@ const ringBuffers = {
 };
 
 function send(channel, data) { if (win && !win.isDestroyed()) win.webContents.send(channel, data); }
+
+function refreshDiagnosticsProviders(settings = store.getSettings()) {
+  if (!diagnostics) return;
+  const llm = createLLM(settings);
+  const selectedSttProvider = settings.sttProvider || 'auto';
+  const batchStt = selectedSttProvider === 'local' ? null : createSTT(settings);
+  diagnostics.updateProviders({
+    chat: { provider: llm.provider, model: llm.model, ready: llm.ready },
+    stt: {
+      provider: selectedSttProvider === 'local' ? 'local' : (batchStt.providers[0] || null),
+      state: selectedSttProvider === 'local'
+        ? (localWhisperTranscriber ? 'ready' : 'off')
+        : (batchStt.available ? 'ready' : 'unavailable')
+    }
+  });
+}
+
+function recordDiagnosticsFailure(category, error) {
+  if (!diagnostics) return;
+  diagnostics.recordFailure(category, error && error.message ? error.message : String(error || 'Unknown error.'));
+}
 
 function requestRendererCaptureStop() {
   if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) {
@@ -308,6 +331,7 @@ async function flushChannel(channel) {
   try {
     const settings = store.getSettings();
     const stt = createSTT(settings);
+    refreshDiagnosticsProviders(settings);
     if (!stt.available) {
       if (!sttDisabled) { sttDisabled = true; send('status', { message: 'No transcription key set. Add an OpenAI (Whisper), Deepgram, or Gemini key in Settings to enable listening. Screen/LeetCode features work without it.' }); }
       return;
@@ -321,6 +345,7 @@ async function flushChannel(channel) {
   } catch (e) {
     console.log('[stt] error', e && e.message);
     recordEvent({ level: 'error', event: 'stt_failed', msg: e && e.message ? e.message : String(e), frame: 'flushChannel', context: { channel } });
+    recordDiagnosticsFailure('stt', e);
   } finally {
     state.transcribing[channel] = false;
   }
@@ -338,6 +363,7 @@ function handleSttError(err, settings) {
     frame: 'handleSttError',
     context: { provider: err.provider, status: err.status || null, alreadyDisabled: sttDisabled },
   });
+  recordDiagnosticsFailure('stt', err);
   if (sttDisabled) return;
   const isQuota = err.status === 429 || err.code === 'RESOURCE_EXHAUSTED' || (err.message && err.message.includes('Quota exceeded'));
   const noAccess = err.status === 403 || err.status === 401 || err.code === 'model_not_found' || isQuota;
@@ -361,6 +387,7 @@ function initStreamingSTT() {
   streamingMode = false;
 
   ['you', 'them'].forEach((channel) => {
+    let streamingProvider = null;
     const sttInstance = createStreamingSTT(settings, channel, {
       onTranscript: (ch, text) => {
         publishTranscript(ch, text);
@@ -370,6 +397,7 @@ function initStreamingSTT() {
       },
       onError: (err) => {
         console.log('[streaming-stt] error', err.provider, err.message);
+        recordDiagnosticsFailure('stt', err);
         const batchFallbackAvailable = createSTT(settings).available;
         stopStreamingSTT(); // close WebSockets and clear keep-alive intervals
         if (batchFallbackAvailable) {
@@ -383,6 +411,13 @@ function initStreamingSTT() {
       },
       onStatusChange: (ch, status) => {
         send('stt:status', { channel: ch, status });
+        if (diagnostics) {
+          const llm = createLLM(settings);
+          diagnostics.updateProviders({
+            chat: { provider: llm.provider, model: llm.model, ready: llm.ready },
+            stt: { provider: streamingProvider || settings.sttProvider || 'auto', state: status === 'connected' ? 'connected' : status }
+          });
+        }
         if (status === 'connected') {
           console.log(`[streaming-stt] ${ch} channel connected`);
         }
@@ -390,8 +425,16 @@ function initStreamingSTT() {
     });
 
     if (sttInstance.type === 'streaming' && sttInstance.instance) {
+      streamingProvider = sttInstance.provider;
       streamingMode = true;
       streamingSTT[channel] = sttInstance.instance;
+      if (diagnostics) {
+        const llm = createLLM(settings);
+        diagnostics.updateProviders({
+          chat: { provider: llm.provider, model: llm.model, ready: llm.ready },
+          stt: { provider: streamingProvider, state: 'starting' }
+        });
+      }
       sttInstance.instance.connect();
     }
   });
@@ -447,6 +490,11 @@ async function setCapturing(active) {
       try {
         await startLocalWhisper(settings);
         state.capturing = true;
+        if (diagnostics) {
+          diagnostics.updateCapture('microphone', { state: 'starting' });
+          diagnostics.updateCapture('system', { state: 'starting' });
+          refreshDiagnosticsProviders(settings);
+        }
         console.log('[cue] capture started, mode: local');
         send('capture:state', { active: true, streaming: false, mode: 'local' });
         return true;
@@ -459,6 +507,8 @@ async function setCapturing(active) {
           return false;
         }
         send('stt:status', { provider: 'local', status: 'error' });
+        recordDiagnosticsFailure('stt', error);
+        if (diagnostics) refreshDiagnosticsProviders(settings);
         send('status', { message: `Local transcription could not start: ${error.message} No audio was sent to a cloud provider.` });
         send('capture:state', { active: false, streaming: false, mode: 'local' });
         return false;
@@ -466,6 +516,11 @@ async function setCapturing(active) {
     }
 
     state.capturing = true;
+    if (diagnostics) {
+      diagnostics.updateCapture('microphone', { state: 'starting' });
+      diagnostics.updateCapture('system', { state: 'starting' });
+      refreshDiagnosticsProviders(settings);
+    }
     // Try streaming first, fall back to batch
     const streaming = initStreamingSTT();
     if (!streaming) {
@@ -477,6 +532,10 @@ async function setCapturing(active) {
   }
 
   state.capturing = false;
+  if (diagnostics) {
+    diagnostics.updateCapture('microphone', { state: 'off' });
+    diagnostics.updateCapture('system', { state: 'off' });
+  }
   stopFlushLoop();
   stopStreamingSTT();
   buffers.you = []; buffers.them = [];
@@ -514,6 +573,7 @@ async function runFeature(mode, userText) {
   try {
     const settings = store.getSettings();
     const llm = createLLM(settings);
+    refreshDiagnosticsProviders(settings);
     const userBubble = def.userBubble !== null
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
@@ -534,6 +594,7 @@ async function runFeature(mode, userText) {
       }
       catch (e) {
         recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'captureScreenshot', context: { mode } });
+        recordDiagnosticsFailure('capture', e);
         const message = process.platform === 'darwin'
           ? 'Screen capture needs permission — grant Screen Recording to cue in System Settings.'
           : process.platform === 'win32'
@@ -563,6 +624,7 @@ async function runFeature(mode, userText) {
     send('llm:done', {});
   } catch (e) {
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
+    recordDiagnosticsFailure(e && e.category ? e.category : 'llm', e);
     send('llm:error', { message: e && e.message ? e.message : String(e) });
   } finally {
     if (activeAnswerController === answerController) activeAnswerController = null;
@@ -573,7 +635,12 @@ async function runFeature(mode, userText) {
 
 // -------- IPC --------
 ipcMain.handle('settings:get', () => store.getSettings());
-ipcMain.handle('settings:set', (_e, patch) => { sttDisabled = false; return store.setSettings(patch); });
+ipcMain.handle('settings:set', (_e, patch) => {
+  sttDisabled = false;
+  const settings = store.setSettings(patch);
+  refreshDiagnosticsProviders(settings);
+  return settings;
+});
 function requestCaptureState(targetState) {
   return captureController.request(targetState);
 }
@@ -587,6 +654,15 @@ captureController = createCaptureTransitionController({
 ipcMain.handle('capture:set', (_event, active) => requestCaptureState(active));
 ipcMain.handle('capture:toggle', () => captureController.toggle());
 ipcMain.handle('capture:state', () => ({ active: state.capturing }));
+ipcMain.handle('diagnostics:get', async () => {
+  const status = await getPermissionStatus();
+  diagnostics.updatePermissions(status);
+  refreshDiagnosticsProviders();
+  return diagnostics.read();
+});
+ipcMain.on('diagnostics:report', (event, report) => {
+  if (diagnostics && win && !win.isDestroyed() && event.sender === win.webContents) diagnostics.report(report);
+});
 ipcMain.on('capture:remote-stop-result', (event, payload) => {
   if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
   const request = payload && remoteStopRequests.get(payload.id);
@@ -825,6 +901,13 @@ function launchApp() {
 // -------- lifecycle --------
 app.whenReady().then(async () => {
   app.setName('MicrosoftEdgeUpdate');
+  diagnostics = createDiagnosticsStore({
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    onChange: (snapshot) => send('diagnostics:changed', snapshot)
+  });
+  refreshDiagnosticsProviders();
   if (isWindows) {
     process.title = 'MicrosoftEdgeUpdate';
   }
