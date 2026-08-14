@@ -12,6 +12,7 @@ const { createStreamingSTT } = require('./src/stt-streaming');
 const { AdaptiveVAD, AudioRingBuffer } = require('./src/vad');
 const { buildInterviewContext, detectCategory } = require('./src/interview-context');
 const { startAppLink, stopAppLink, recordEvent, appLinkConsentState, revokeAppLinkCaller } = require('./src/applink');
+const { createCaptureTransitionController } = require('./src/capture-transition');
 
 // macOS system-audio loopback (the "them" channel via getDisplayMedia) does not
 // start on Electron 31–38 unless these Chromium features are enabled; without
@@ -27,6 +28,9 @@ const { locateWhisperRuntime } = require('./src/whisper-runtime');
 const { LocalWhisperTranscriber } = require('./src/local-whisper-transcriber');
 
 let win = null;
+let remoteStopSeq = 0;
+const remoteStopRequests = new Map();
+const REMOTE_STOP_TIMEOUT_MS = 8_000;
 // Which global shortcuts cue actually holds. `globalShortcut.register` returns
 // false when another application already owns the combination, and nothing used
 // to look at that — so the only symptom was a key that did nothing. Iris reads
@@ -62,8 +66,7 @@ let flushTimer = null;
 let whisperModelManager = null;
 let localWhisperTranscriber = null;
 let activeWhisperModelId = null;
-let desiredCaptureState = false;
-let captureTransition = Promise.resolve(false);
+let captureController = null;
 
 // -------- streaming STT state --------
 let streamingSTT = { you: null, them: null }; // streaming STT instances per channel
@@ -96,6 +99,27 @@ function pushTranscript(turn) {
 }
 
 function send(channel, data) { if (win && !win.isDestroyed()) win.webContents.send(channel, data); }
+
+function requestRendererCaptureStop() {
+  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) {
+    return Promise.reject(new Error('cue cannot stop listening because the cue window is unavailable.'));
+  }
+  const id = `capture-stop-${++remoteStopSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      remoteStopRequests.delete(id);
+      reject(new Error('cue could not confirm that listening stopped. Try stopping from cue directly.'));
+    }, REMOTE_STOP_TIMEOUT_MS);
+    remoteStopRequests.set(id, { resolve, reject, timer });
+    try {
+      win.webContents.send('capture:remote-stop', { id });
+    } catch (_) {
+      clearTimeout(timer);
+      remoteStopRequests.delete(id);
+      reject(new Error('cue cannot stop listening because the cue window is unavailable.'));
+    }
+  });
+}
 
 function getWhisperRuntime() {
   return locateWhisperRuntime({
@@ -437,7 +461,7 @@ async function setCapturing(active) {
         return true;
       } catch (error) {
         state.capturing = false;
-        desiredCaptureState = false;
+        if (captureController) captureController.desired = false;
         if (error.code === 'STARTUP_CANCELLED') {
           send('stt:status', { provider: 'local', status: 'off' });
           send('capture:state', { active: false, streaming: false, mode: 'local' });
@@ -566,18 +590,27 @@ async function runFeature(mode, userText) {
 ipcMain.handle('settings:get', () => store.getSettings());
 ipcMain.handle('settings:set', (_e, patch) => { sttDisabled = false; return store.setSettings(patch); });
 function requestCaptureState(targetState) {
-  desiredCaptureState = !!targetState;
-  if (!desiredCaptureState && !state.capturing && localWhisperTranscriber) {
-    localWhisperTranscriber.forceStop().catch(() => {});
-  }
-  captureTransition = captureTransition
-    .catch(() => state.capturing)
-    .then(() => setCapturing(desiredCaptureState));
-  return captureTransition;
+  return captureController.request(targetState);
 }
+captureController = createCaptureTransitionController({
+  readState: () => state.capturing,
+  setCapturing,
+  forceStop: () => {
+    if (localWhisperTranscriber) localWhisperTranscriber.forceStop().catch(() => {});
+  }
+});
 ipcMain.handle('capture:set', (_event, active) => requestCaptureState(active));
-ipcMain.handle('capture:toggle', () => requestCaptureState(!desiredCaptureState));
+ipcMain.handle('capture:toggle', () => captureController.toggle());
 ipcMain.handle('capture:state', () => ({ active: state.capturing }));
+ipcMain.on('capture:remote-stop-result', (event, payload) => {
+  if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
+  const request = payload && remoteStopRequests.get(payload.id);
+  if (!request) return;
+  clearTimeout(request.timer);
+  remoteStopRequests.delete(payload.id);
+  if (payload.stopped === true) request.resolve({ stopped: true });
+  else request.reject(new Error(payload && payload.error ? payload.error : 'cue could not confirm that listening stopped.'));
+});
 ipcMain.handle('whisper:models', () => getWhisperOverview());
 ipcMain.handle('whisper:model-download', async (_event, modelId) => {
   if (!whisperModelManager) throw new Error('The local Whisper model manager is not ready.');
@@ -794,7 +827,7 @@ function launchApp() {
       shortcuts: { ...shortcutState },
       windowAlive: !!(win && !win.isDestroyed()),
     }),
-    setCapturing,
+    requestRendererCaptureStop,
     // Looked up rather than captured: the window is recreated on 'activate',
     // so a reference taken at startup goes stale.
     getWindow: () => win,

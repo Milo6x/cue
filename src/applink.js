@@ -15,6 +15,7 @@
 const { app, dialog, ipcMain } = require('electron');
 const { AppLinkServer } = require('../vendor/app-link');
 const { describeState, consentCopy } = require('./applink-state');
+const { controlCapture } = require('./applink-capture-control');
 
 let link = null;
 let consentSeq = 0;
@@ -114,17 +115,17 @@ function startAppLink(deps) {
   // microphone is doing should be visible afterwards in the same place a user
   // or a patch agent looks for anything else that happened.
   link.action('set_capturing', {
-    description: 'Start or stop listening',
+    description: 'Stop listening; start listening from cue',
     inputSchema: { type: 'object', properties: { active: { type: 'boolean' } }, required: ['active'] },
-    handler: (args, { caller }) => {
+    handler: async (args, { caller }) => {
       const active = !!args.active;
-      deps.setCapturing(active);
+      const result = await controlCapture(active, { requestStop: deps.requestRendererCaptureStop });
       link.record({
         level: 'info',
         event: 'applink_set_capturing',
-        msg: `${caller.name} ${active ? 'started' : 'stopped'} listening`,
+        msg: `${caller.name} stopped listening`,
       });
-      return { capturing: active };
+      return result;
     },
   });
 

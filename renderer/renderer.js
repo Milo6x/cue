@@ -565,11 +565,12 @@
   // click handler's call chain, preserving the user gesture required by getDisplayMedia.
   $('#stop-btn').addEventListener('click', async () => {
     if (!captureCoordinator) return;
+    clearCaptureFailureStatus();
     try {
       if (captureCoordinator.snapshot().session.state === 'off') await captureCoordinator.start();
       else await captureCoordinator.stop();
     } catch (error) {
-      showStatus('Listening could not be changed. Please try again.');
+      showStatus(captureErrorMessage(error, 'Listening could not be changed. Please try again.'), { persistent: true });
     }
   });
 
@@ -633,7 +634,15 @@
       category: error.category || 'capture',
       message: error.message
     });
-    showStatus(error.message);
+    if (captureCoordinator) {
+      void captureCoordinator.channelFailed(channel, error).catch((failure) => {
+        showStatus(captureErrorMessage(failure, 'Listening could not be updated. Please try again.'), { persistent: true });
+      });
+    }
+  }
+
+  function captureErrorMessage(error, fallback) {
+    return error && typeof error.message === 'string' && error.message ? error.message : fallback;
   }
 
   function microphoneError(error) {
@@ -839,10 +848,11 @@
     if (historyBtn) historyBtn.classList.toggle('listening', listening);
     setLiveDotState(listening ? 'idle' : 'off');
     updateSttStatus({ active: listening });
-    const failed = ['microphone', 'system'].map((channel) => snapshot[channel]).find((channel) => channel.state === 'failed');
-    if (listening && failed && failed.errorMessage) showStatus(failed.errorMessage);
+    const failureMessage = captureStatusTracker.select(snapshot);
+    if (failureMessage) showStatus(failureMessage, { persistent: true });
   }
 
+  const captureStatusTracker = new CueCaptureStatus.CaptureStatusTracker();
   captureCoordinator = new CueCapture.CaptureCoordinator({
     channels: {
       microphone: { start: startMic, stop: stopMic },
@@ -852,6 +862,16 @@
     onChange: (snapshot) => {
       cue.diagnosticsReport({ type: 'capture', snapshot });
       renderCaptureSnapshot(snapshot);
+    }
+  });
+
+  cue.on('capture:remote-stop', async ({ id }) => {
+    try {
+      await captureCoordinator.stop();
+      await cue.captureSet(false);
+      cue.captureRemoteStopAck(id, { stopped: true });
+    } catch (error) {
+      cue.captureRemoteStopAck(id, { stopped: false, error: captureErrorMessage(error, 'cue could not stop listening.') });
     }
   });
 
@@ -1179,7 +1199,8 @@
     }
   });
   let statusTimer = null;
-  function showStatus(message) {
+  let persistentCaptureStatus = null;
+  function statusElement() {
     let el = document.getElementById('cue-status');
     if (!el) {
       el = document.createElement('div');
@@ -1195,10 +1216,23 @@
         document.getElementById('panel').appendChild(el);
       }
     }
+    return el;
+  }
+  function clearCaptureFailureStatus() {
+    captureStatusTracker.clear();
+    persistentCaptureStatus = null;
+    clearTimeout(statusTimer);
+    const el = document.getElementById('cue-status');
+    if (el) el.classList.remove('show');
+  }
+  function showStatus(message, { persistent = false } = {}) {
+    if (persistent) persistentCaptureStatus = message;
+    if (!persistent && persistentCaptureStatus) message = persistentCaptureStatus;
+    const el = statusElement();
     el.textContent = message;
     el.classList.add('show');
     clearTimeout(statusTimer);
-    statusTimer = setTimeout(() => el.classList.remove('show'), 11000);
+    if (!persistentCaptureStatus) statusTimer = setTimeout(() => el.classList.remove('show'), 11000);
   }
   cue.on('status', ({ message }) => {
     cue.log('[status] ' + message);

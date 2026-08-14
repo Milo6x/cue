@@ -21,7 +21,9 @@ test('preload exposes deterministic capture and diagnostics bridge methods', () 
   assert.match(preload, /captureToggle:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('capture:toggle'\)/);
   assert.match(preload, /diagnosticsGet:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('diagnostics:get'\)/);
   assert.match(preload, /diagnosticsReport:\s*\(event\)\s*=>\s*ipcRenderer\.send\('diagnostics:report', event\)/);
+  assert.match(preload, /captureRemoteStopAck:\s*\(id, result\)\s*=>\s*ipcRenderer\.send\('capture:remote-stop-result', \{ id, \.\.\.result \}\)/);
   assert.match(preload, /allowed\s*=\s*\[[\s\S]*?'diagnostics:changed'/);
+  assert.match(preload, /allowed\s*=\s*\[[\s\S]*?'capture:remote-stop'/);
 });
 
 test('renderer routes capture lifecycle through the coordinator, not toggle side effects', () => {
@@ -35,14 +37,17 @@ test('renderer routes capture lifecycle through the coordinator, not toggle side
   assert.match(buttonHandler, /captureCoordinator\.(start|stop)\(\)/);
   assert.doesNotMatch(buttonHandler, /cue\.captureToggle|startSystemAudio\(|startMic\(|stopMic\(|stopSystemAudio\(/);
   assert.doesNotMatch(captureStateHandler, /startMic\(|startSystemAudio\(|stopMic\(|stopSystemAudio\(/);
+  assert.match(renderer, /cue\.on\('capture:remote-stop', async \(\{ id \}\) => \{[\s\S]{0,500}await captureCoordinator\.stop\(\)[\s\S]{0,500}await cue\.captureSet\(false\)[\s\S]{0,500}cue\.captureRemoteStopAck\(id, \{ stopped: true \}\)/);
+  assert.match(read('renderer/index.html'), /<script src="capture-status-tracker\.js"><\/script>\s*<script src="renderer\.js"><\/script>/);
 });
 
 test('main serializes deterministic capture state requests', () => {
   const main = read('main.js');
 
   assert.match(main, /function requestCaptureState\(targetState\)/);
+  assert.match(main, /return captureController\.request\(targetState\)/);
   assert.match(main, /ipcMain\.handle\('capture:set', \(_event, active\) => requestCaptureState\(active\)\)/);
-  assert.match(main, /ipcMain\.handle\('capture:toggle', \(\) => requestCaptureState\(!desiredCaptureState\)\)/);
+  assert.match(main, /ipcMain\.handle\('capture:toggle', \(\) => captureController\.toggle\(\)\)/);
 });
 
 test('renderer registers worklet resources before connecting them', () => {

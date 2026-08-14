@@ -7,6 +7,9 @@
       this.startPromise = null;
       this.stopPromise = null;
       this.teardownPromise = null;
+      this.channelFailurePromise = null;
+      this.channelStopPromises = {};
+      this.stoppedChannels = new Set();
       this.lifecycleVersion = 0;
       this.state = this.createOffState();
     }
@@ -38,7 +41,40 @@
       return this.stopPromise;
     }
 
+    channelFailed(name, error) {
+      if (!Object.prototype.hasOwnProperty.call(this.channels, name)) {
+        return Promise.reject(new Error(`Unknown capture channel: ${name}`));
+      }
+      if (this.stopPromise) return this.stopPromise;
+      if (this.startPromise) return this.startPromise.then(() => this.channelFailed(name, error));
+
+      const previous = this.channelFailurePromise || Promise.resolve();
+      const failure = previous
+        .catch(() => {})
+        .then(() => this.performChannelFailure(name, error));
+      let tracked;
+      tracked = failure.finally(() => {
+        if (this.channelFailurePromise === tracked) this.channelFailurePromise = null;
+      });
+      this.channelFailurePromise = tracked;
+      return tracked;
+    }
+
+    async performChannelFailure(name, error) {
+      if (this.stopPromise || this.state.session.state === 'off') return this.snapshot();
+      if (this.state[name].state === 'failed' || this.state[name].state === 'off') return this.snapshot();
+
+      this.setChannelFailed(name, error);
+      this.publish();
+      await this.stopChannel(name);
+      if (this.hasUsableChannel()) return this.snapshot();
+      await this.teardown();
+      return this.snapshot();
+    }
+
     async startSession(lifecycleVersion) {
+      this.channelStopPromises = {};
+      this.stoppedChannels.clear();
       this.state.session.state = 'starting';
       this.setChannelStarting('microphone');
       this.setChannelStarting('system');
@@ -114,11 +150,29 @@
       this.publish();
       await Promise.allSettled([
         Promise.resolve().then(() => this.setPipelineActive(false)),
-        Promise.resolve().then(() => this.channels.microphone.stop()),
-        Promise.resolve().then(() => this.channels.system.stop())
+        Promise.resolve().then(() => this.stopChannel('microphone')),
+        Promise.resolve().then(() => this.stopChannel('system'))
       ]);
       this.state = this.createOffState();
       this.publish();
+    }
+
+    stopChannel(name) {
+      if (this.stoppedChannels.has(name)) return Promise.resolve();
+      if (this.channelStopPromises[name]) return this.channelStopPromises[name];
+      const stopping = Promise.resolve()
+        .then(() => this.channels[name].stop())
+        .catch(() => {})
+        .finally(() => {
+          this.stoppedChannels.add(name);
+          delete this.channelStopPromises[name];
+        });
+      this.channelStopPromises[name] = stopping;
+      return stopping;
+    }
+
+    hasUsableChannel() {
+      return ['microphone', 'system'].some((name) => this.state[name].state === 'ready');
     }
 
     setChannelStarting(name) {
@@ -150,6 +204,16 @@
         trackLabel: null,
         errorCategory: details.category || 'capture',
         errorMessage: this.safeMessage(details.message == null ? reason : details.message)
+      };
+    }
+
+    setChannelFailed(name, error) {
+      const details = error && (typeof error === 'object' || typeof error === 'function') ? error : {};
+      this.state[name] = {
+        state: 'failed',
+        trackLabel: null,
+        errorCategory: details.category || 'capture',
+        errorMessage: this.safeMessage(details.message == null ? error : details.message)
       };
     }
 

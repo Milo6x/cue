@@ -375,3 +375,77 @@ test('isolates snapshots from caller and change-listener mutations', async () =>
   assert.equal(afterMutation.microphone.trackLabel, 'Built-in Microphone');
   assert.equal(coordinator.snapshot().microphone.state, 'ready');
 });
+
+test('keeps the pipeline active when one ready channel ends', async () => {
+  const drivers = createDrivers();
+  const pipelineCalls = [];
+  const changes = [];
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async (active) => { pipelineCalls.push(active); return true; },
+    onChange: (snapshot) => changes.push(snapshot)
+  });
+  await coordinator.start();
+
+  await coordinator.channelFailed('microphone', { category: 'device', message: 'Microphone disconnected.' });
+
+  assert.equal(coordinator.snapshot().session.state, 'ready');
+  assert.deepEqual(coordinator.snapshot().microphone, {
+    state: 'failed', trackLabel: null, errorCategory: 'device', errorMessage: 'Microphone disconnected.'
+  });
+  assert.equal(coordinator.snapshot().system.state, 'ready');
+  assert.deepEqual(pipelineCalls, [true]);
+  assert.equal(drivers.calls.microphone.stop, 1);
+  assert.equal(drivers.calls.system.stop, 0);
+  assert.ok(changes.some((snapshot) => snapshot.microphone.state === 'failed' && snapshot.session.state === 'ready'));
+});
+
+test('deactivates once after both channels end and publishes failures before off', async () => {
+  const drivers = createDrivers();
+  const pipelineCalls = [];
+  const changes = [];
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async (active) => { pipelineCalls.push(active); return true; },
+    onChange: (snapshot) => changes.push(snapshot)
+  });
+  await coordinator.start();
+
+  await Promise.all([
+    coordinator.channelFailed('microphone', { category: 'device', message: 'Microphone disconnected.' }),
+    coordinator.channelFailed('system', { category: 'permission', message: 'System audio disconnected.' })
+  ]);
+
+  assert.equal(coordinator.snapshot().session.state, 'off');
+  assert.deepEqual(pipelineCalls, [true, false]);
+  assert.deepEqual(drivers.calls, {
+    microphone: { start: 1, stop: 1 },
+    system: { start: 1, stop: 1 }
+  });
+  assert.ok(changes.some((snapshot) => snapshot.microphone.state === 'failed' || snapshot.system.state === 'failed'));
+  assert.equal(changes.at(-1).session.state, 'off');
+});
+
+test('deduplicates overlapping reports for the same ended channel', async () => {
+  const drivers = createDrivers();
+  const coordinator = new CaptureCoordinator({ channels: drivers.channels, setPipelineActive: async () => true });
+  await coordinator.start();
+
+  await Promise.all([
+    coordinator.channelFailed('microphone', { category: 'device', message: 'Microphone disconnected.' }),
+    coordinator.channelFailed('microphone', { category: 'device', message: 'Microphone disconnected.' })
+  ]);
+
+  assert.equal(drivers.calls.microphone.stop, 1);
+  assert.equal(coordinator.snapshot().session.state, 'ready');
+});
+
+test('rejects an unknown ended channel without touching capture', async () => {
+  const drivers = createDrivers();
+  const coordinator = new CaptureCoordinator({ channels: drivers.channels, setPipelineActive: async () => true });
+  await assert.rejects(() => coordinator.channelFailed('camera', new Error('ended')), /unknown capture channel/i);
+  assert.deepEqual(drivers.calls, {
+    microphone: { start: 0, stop: 0 },
+    system: { start: 0, stop: 0 }
+  });
+});
