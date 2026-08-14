@@ -52,7 +52,7 @@ function buildOpenAIRealtimeSession(options = {}) {
 
 function isNuisanceOpenAIRealtimeFinal(transcript, languages) {
   const text = String(transcript || '').trim();
-  if (!text || /^[\p{P}\p{S}\s]+$/u.test(text)) return true;
+  if (looksLikeHallucination(text) || /^[\p{P}\p{S}\s]+$/u.test(text)) return true;
 
   // Cue's cloud streaming default is English. A lone Hangul glyph is a known
   // ambient-audio false positive in that mode, but remains valid if Korean is

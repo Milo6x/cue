@@ -68,11 +68,11 @@ test('OpenAI realtime defaults to live transcription with English context tuned 
   assert.equal(Object.hasOwn(transcription, 'language'), false);
 });
 
-test('OpenAI realtime drops empty, punctuation, and unexpected single-character Hangul finals without dropping words or numbers', () => {
+test('OpenAI realtime drops shared hallucinations, punctuation, and unexpected single-character Hangul without dropping words or numbers', () => {
   const finals = [];
   const stt = new OpenAIRealtimeSTT('k', { onTranscript: (text) => finals.push(text) });
 
-  [' ', '…', '?!', '한', 'I', '42'].forEach((transcript) => {
+  [' ', '…', '?!', '한', 'Thank you for watching.', 'I', '42'].forEach((transcript) => {
     stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', transcript });
   });
 
