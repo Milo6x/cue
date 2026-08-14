@@ -9,10 +9,13 @@ const PROVIDER_LABELS = {
   minimax: 'MiniMax'
 };
 const MAX_ERROR_TEXT_LENGTH = 8 * 1024;
+const MAX_SERIALIZATION_DEPTH = 3;
+const MAX_SERIALIZATION_ARRAY_ITEMS = 8;
+const SERIALIZED_ERROR_KEYS = ['retryDelay', 'code', 'status', 'type', 'error', 'details', 'message'];
 const SECRET_FIELD_NAME = '(?:authorization|api[-_]key|x-(?:goog-)?api-key|(?:[a-z][a-z0-9-]*)_api_key)';
 const QUOTED_JSON_SECRET_FIELD_RE = new RegExp(`(["']${SECRET_FIELD_NAME}["']\\s*:\\s*["'])[^"']*(["'])`, 'gi');
 const QUOTED_SECRET_FIELD_VALUE_RE = new RegExp(`(\\b${SECRET_FIELD_NAME}\\s*[:=]\\s*["'])[^"']*(["'])`, 'gi');
-const PLAIN_SECRET_FIELD_VALUE_RE = new RegExp(`(\\b${SECRET_FIELD_NAME}\\s*[:=]\\s*)(?!["'])[^;\\r\\n]*`, 'gi');
+const PLAIN_SECRET_FIELD_VALUE_RE = new RegExp(`(\\b${SECRET_FIELD_NAME}\\s*[:=]\\s*)(?!["'])[^;,\\r\\n]*`, 'gi');
 
 function providerLabel(provider) {
   if (!provider) return 'Provider';
@@ -53,7 +56,42 @@ function errorDetails(error) {
 
 function safeStringify(value) {
   if (typeof value === 'string') return clipErrorText(value);
-  try { return value ? clipErrorText(JSON.stringify(value)) : ''; } catch (_) { return ''; }
+  const budget = { remaining: MAX_ERROR_TEXT_LENGTH };
+  const selected = selectErrorValue(value, 0, budget);
+  if (selected === undefined) return '';
+  try { return clipErrorText(JSON.stringify(selected)); } catch (_) { return ''; }
+}
+
+function selectErrorValue(value, depth, budget) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    const selected = value.slice(0, Math.max(0, budget.remaining));
+    budget.remaining -= selected.length;
+    return selected;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (depth >= MAX_SERIALIZATION_DEPTH || budget.remaining <= 0) return undefined;
+  if (Array.isArray(value)) {
+    const selected = [];
+    for (let index = 0; index < Math.min(value.length, MAX_SERIALIZATION_ARRAY_ITEMS); index += 1) {
+      const item = selectErrorValue(value[index], depth + 1, budget);
+      if (item !== undefined) selected.push(item);
+    }
+    return selected;
+  }
+  if (typeof value !== 'object') return undefined;
+
+  const selected = {};
+  for (const key of SERIALIZED_ERROR_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    try {
+      const item = selectErrorValue(value[key], depth + 1, budget);
+      if (item !== undefined) selected[key] = item;
+    } catch (_) {
+      // A provider may expose a throwing getter; skip it rather than probing unknown fields.
+    }
+  }
+  return selected;
 }
 
 function isQuotaError(error) {
@@ -110,6 +148,9 @@ function classifyProviderError(error, context = {}) {
   } else if (explicitStatus === 429) {
     category = 'quota';
     classifiedStatus = 429;
+  } else if (explicitCategory === 'timeout') {
+    category = 'timeout';
+    retryable = true;
   } else if (errorName === 'aborterror' || normalizedCode === 'abort_err' || /\baborterror\b|\babort_err\b/i.test(text)) {
     category = 'cancelled';
   } else if (normalizedCode === 'unauthenticated') {
@@ -122,11 +163,17 @@ function classifyProviderError(error, context = {}) {
   } else if (normalizedCode === 'not_found' || normalizedCode === '404') {
     category = 'model';
     classifiedStatus = status || 404;
-  } else if (explicitCategory === 'timeout' || normalizedCode === 'deadline_exceeded' || normalizedCode === 'etimedout') {
+  } else if (normalizedCode === 'deadline_exceeded' || normalizedCode === 'etimedout') {
     category = 'timeout';
     retryable = true;
   } else if (normalizedCode === 'unavailable') {
     category = 'service';
+    retryable = true;
+  } else if (status === 408 || (status !== null && status >= 500 && status <= 599)) {
+    category = 'service';
+    retryable = true;
+  } else if (/timeout/i.test(errorName) || /\brequest timed out\b/i.test(text)) {
+    category = 'timeout';
     retryable = true;
   } else if (/\b401\b|invalid (?:api )?key|invalid[_ -]?api[_ -]?key|unauthori[sz]ed|authentication (?:failed|required)/i.test(text)) {
     category = 'authentication';
@@ -144,17 +191,17 @@ function classifyProviderError(error, context = {}) {
   }
 
   const classification = { category, retryable, provider, model, status: classifiedStatus };
-  return { ...classification, message: formatClassifiedMessage(classification, rawMessage) };
+  return { ...classification, message: formatClassifiedMessage(classification, rawMessage, text) };
 }
 
-function formatClassifiedMessage({ category, status, provider, model }, rawMessage) {
+function formatClassifiedMessage({ category, status, provider, model }, rawMessage, retrySource = rawMessage) {
   const label = providerLabel(provider);
 
   if (category === 'configuration') return redactSecrets(rawMessage || `Complete the ${label} provider settings.`);
   if (category === 'authentication') return `${label} credentials were rejected. Update your API key in Settings and try again.`;
   if (category === 'permission') return `${label} denied permission for the selected model. Check your key permissions and selected model in Settings.`;
   if (category === 'quota') {
-    const retrySeconds = extractRetryDelaySeconds(rawMessage);
+    const retrySeconds = extractRetryDelaySeconds(retrySource);
     const waitHint = retrySeconds ? ` Wait about ${formatRetryWait(retrySeconds)}` : ' Wait a moment';
     return `${label} free-tier quota exhausted (429 Too Many Requests).${waitHint} and try again, or add billing to your ${label} account. You can also switch providers or models in Settings.`;
   }

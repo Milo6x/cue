@@ -105,7 +105,26 @@ test('keeps AbortError cancellation out of automatic retry', () => {
     assert.equal(classified.retryable, false);
     assert.equal(classified.message, 'Request was cancelled.');
   }
-  assert.equal(classifyProviderError(new Error('request timed out')).category, 'unknown');
+  const policyTimeout = classifyProviderError(Object.assign(new Error('Request timed out.'), { name: 'AbortError', category: 'timeout' }));
+  assert.equal(policyTimeout.category, 'timeout');
+  assert.equal(policyTimeout.retryable, true);
+});
+
+test('infers transient transport failures when no explicit HTTP status exists', () => {
+  const cases = [
+    [new Error('got status: 503 Service Unavailable'), 'service', true],
+    [Object.assign(new Error('upstream failed'), { code: 503 }), 'service', true],
+    [new Error('got status: 408 Request Timeout'), 'service', true],
+    [Object.assign(new Error('Request timed out.'), { name: 'APIConnectionTimeoutError' }), 'timeout', true],
+    [new Error('request timed out'), 'timeout', true],
+    [Object.assign(new Error('socket failed'), { code: 'ETIMEDOUT' }), 'timeout', true]
+  ];
+
+  for (const [error, category, retryable] of cases) {
+    const classified = classifyProviderError(error);
+    assert.equal(classified.category, category, error.message);
+    assert.equal(classified.retryable, retryable, error.message);
+  }
 });
 
 test('maps provider status codes without a numeric HTTP status', () => {
@@ -146,6 +165,9 @@ test('keeps unknown errors non-retryable and redacts secrets without hiding usef
   assert.doesNotMatch(assignmentHeader, /Token|opaque|secret|value/);
   assert.match(assignmentHeader, /next=safe/);
   assert.doesNotMatch(redactSecrets('authorization = Basic lower-case secret'), /Basic|lower-case|secret/);
+  const commaDelimitedKey = redactSecrets('api_key=secret, model=gpt-4o-mini');
+  assert.doesNotMatch(commaDelimitedKey, /secret/);
+  assert.match(commaDelimitedKey, /model=gpt-4o-mini/);
   assert.doesNotMatch(redactSecrets('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature-value'), /eyJhbGciOiJIUzI1NiJ9/);
 });
 
@@ -169,6 +191,27 @@ test('bounds huge provider text before safe classification output', () => {
   assert.match(classified.message, /useful prefix/);
   assert.ok(classified.message.length <= 8_192);
   assert.doesNotMatch(classified.message, /sk-huge-secret-value/);
+});
+
+test('selectively serializes known bounded provider body fields', () => {
+  const responseBody = new Proxy({
+    details: [{ retryDelay: '38s', message: `useful prefix ${'x'.repeat(9_000_000)}` }],
+    unknown: 'must not be read'
+  }, {
+    get(target, property) {
+      if (property === 'unknown') throw new Error('unknown bulk field was read');
+      return target[property];
+    }
+  });
+  const error = Object.assign(new Error('RESOURCE_EXHAUSTED'), {
+    code: 'RESOURCE_EXHAUSTED',
+    response: { data: responseBody }
+  });
+  const classified = classifyProviderError(error, { provider: 'gemini' });
+
+  assert.equal(classified.category, 'quota');
+  assert.ok(classified.message.length <= 8_192);
+  assert.match(classified.message, /Wait about 38s/);
 });
 
 test('sanitizes the cause without copying a provider request or response', () => {
