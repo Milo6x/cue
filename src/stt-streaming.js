@@ -4,9 +4,61 @@
 // This module manages a persistent WebSocket connection for real-time transcription
 // with sub-200ms latency, interim results, and automatic reconnection.
 
-const { looksLikeHallucination } = require('./stt');
+const { buildVocabPrompt, looksLikeHallucination } = require('./stt');
 const { pcmToWav } = require('./wav');
 const { CURRENT_GEMINI_DEFAULT } = require('./llm');
+
+const DEFAULT_OPENAI_REALTIME_MODEL = 'gpt-live-transcribe';
+const DEFAULT_OPENAI_REALTIME_LANGUAGES = ['en'];
+const DEFAULT_OPENAI_REALTIME_DELAY = 'medium';
+
+function normalizeRealtimeLanguages(languages) {
+  const normalized = (Array.isArray(languages) ? languages : [])
+    .filter((language) => typeof language === 'string')
+    .map((language) => language.trim().toLowerCase())
+    .filter(Boolean);
+  return normalized.length ? Array.from(new Set(normalized)) : DEFAULT_OPENAI_REALTIME_LANGUAGES;
+}
+
+function buildRealtimeKeywords(vocabPrompt) {
+  return Array.from(new Set(String(vocabPrompt || '')
+    .split(',')
+    .map((keyword) => keyword.replace(/[<>\r\n]/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)))
+    .slice(0, 60);
+}
+
+function buildOpenAIRealtimeSession(options = {}) {
+  const languages = normalizeRealtimeLanguages(options.languages);
+  const keywords = buildRealtimeKeywords(options.vocabPrompt);
+  const prompt = `Live interview audio. Expected terminology: ${keywords.join(', ')}`.slice(0, 850);
+
+  return {
+    type: 'transcription',
+    audio: {
+      input: {
+        format: { type: 'audio/pcm', rate: 24000 },
+        transcription: {
+          model: options.model || DEFAULT_OPENAI_REALTIME_MODEL,
+          languages,
+          prompt,
+          keywords,
+          delay: options.delay || DEFAULT_OPENAI_REALTIME_DELAY
+        }
+      }
+    }
+  };
+}
+
+function isNuisanceOpenAIRealtimeFinal(transcript, languages) {
+  const text = String(transcript || '').trim();
+  if (!text || /^[\p{P}\p{S}\s]+$/u.test(text)) return true;
+
+  // Cue's cloud streaming default is English. A lone Hangul glyph is a known
+  // ambient-audio false positive in that mode, but remains valid if Korean is
+  // ever explicitly configured as an expected input language.
+  return languages.length === 1 && languages[0] === 'en' && /^[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]$/u.test(text);
+}
 
 // ============================================================================
 // OpenAI Realtime Transcription Session (WebSocket)
@@ -16,7 +68,10 @@ const { CURRENT_GEMINI_DEFAULT } = require('./llm');
 class OpenAIRealtimeSTT {
   constructor(apiKey, options = {}) {
     this.apiKey = apiKey;
-    this.model = options.model || 'gpt-realtime-whisper';
+    this.model = options.model || DEFAULT_OPENAI_REALTIME_MODEL;
+    this.languages = normalizeRealtimeLanguages(options.languages);
+    this.vocabPrompt = options.vocabPrompt || '';
+    this.delay = options.delay || DEFAULT_OPENAI_REALTIME_DELAY;
     this.ws = null;
     this.connected = false;
     this.reconnecting = false;
@@ -29,10 +84,12 @@ class OpenAIRealtimeSTT {
     this._reconnectDelay = 1000;
     this._pendingAudio = [];
     this._sessionReady = false;
+    this._stopped = false;
   }
 
   async connect() {
     if (this.ws && this.connected) return;
+    this._stopped = false;
 
     try {
       const WebSocket = require('ws');
@@ -47,6 +104,7 @@ class OpenAIRealtimeSTT {
       });
 
       this.ws.on('open', () => {
+        if (this._stopped) return;
         this.connected = true;
         this._reconnectAttempts = 0;
         this.onStatusChange('connected');
@@ -54,18 +112,12 @@ class OpenAIRealtimeSTT {
         // Configure the transcription session (GA format)
         this._sendEvent({
           type: 'session.update',
-          session: {
-            type: 'transcription',
-            audio: {
-              input: {
-                format: { type: 'audio/pcm', rate: 24000 },
-                transcription: {
-                  model: this.model,
-                  language: 'en'
-                }
-              }
-            }
-          }
+          session: buildOpenAIRealtimeSession({
+            model: this.model,
+            languages: this.languages,
+            vocabPrompt: this.vocabPrompt,
+            delay: this.delay
+          })
         });
       });
 
@@ -81,6 +133,7 @@ class OpenAIRealtimeSTT {
       this.ws.on('close', (code) => {
         this.connected = false;
         this._sessionReady = false;
+        if (this._stopped) return;
         this.onStatusChange('disconnected');
         if (code !== 1000 && !this.reconnecting) {
           this._attemptReconnect();
@@ -88,17 +141,19 @@ class OpenAIRealtimeSTT {
       });
 
       this.ws.on('error', (err) => {
+        if (this._stopped) return;
         this.onError({ provider: 'openai-realtime', message: err.message, status: null });
       });
 
     } catch (e) {
+      if (this._stopped) return;
       this.onError({ provider: 'openai-realtime', message: e.message, status: null });
     }
   }
 
   _handleEvent(event) {
+    if (this._stopped) return;
     switch (event.type) {
-      case 'session.created':
       case 'session.updated':
         this._sessionReady = true;
         this._flushPendingAudio();
@@ -111,7 +166,7 @@ class OpenAIRealtimeSTT {
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
-        if (event.transcript && event.transcript.trim()) {
+        if (!isNuisanceOpenAIRealtimeFinal(event.transcript, this.languages)) {
           this.onTranscript(event.transcript.trim());
         }
         break;
@@ -126,6 +181,7 @@ class OpenAIRealtimeSTT {
         break;
 
       case 'error':
+        this._sessionReady = false;
         this.onError({
           provider: 'openai-realtime',
           message: event.error?.message || 'Unknown realtime error',
@@ -136,6 +192,7 @@ class OpenAIRealtimeSTT {
   }
 
   sendAudio(pcmBuffer) {
+    if (this._stopped) return;
     if (!this.connected || !this._sessionReady) {
       // Buffer audio until session is ready (max 5 seconds worth)
       this._pendingAudio.push(pcmBuffer);
@@ -170,6 +227,7 @@ class OpenAIRealtimeSTT {
   }
 
   _flushPendingAudio() {
+    if (this._stopped) return;
     while (this._pendingAudio.length > 0) {
       const chunk = this._pendingAudio.shift();
       const resampled = this._resample16to24(Buffer.from(chunk));
@@ -188,6 +246,7 @@ class OpenAIRealtimeSTT {
   }
 
   _attemptReconnect() {
+    if (this._stopped) return;
     if (this._reconnectAttempts >= this._maxReconnectAttempts) {
       this.onError({ provider: 'openai-realtime', message: 'Max reconnection attempts reached', status: null });
       return;
@@ -196,12 +255,14 @@ class OpenAIRealtimeSTT {
     this._reconnectAttempts++;
     const delay = this._reconnectDelay * Math.pow(2, this._reconnectAttempts - 1);
     setTimeout(() => {
+      if (this._stopped) return;
       this.reconnecting = false;
       this.connect();
     }, Math.min(delay, 16000));
   }
 
   disconnect() {
+    this._stopped = true;
     this._sessionReady = false;
     this._pendingAudio = [];
     if (this.ws) {
@@ -428,7 +489,7 @@ function createStreamingSTT(settings, channel, callbacks) {
   // Priority 2: OpenAI Realtime API (excellent quality, slightly higher latency)
   if ((selectedProvider === 'auto' || selectedProvider === 'openai') && keys.openai) {
     const stt = new OpenAIRealtimeSTT(keys.openai, {
-      model: 'gpt-realtime-whisper', // only this model gives true streaming deltas
+      vocabPrompt: buildVocabPrompt(settings),
       onTranscript: (text) => onTranscript(channel, text),
       onInterim: (text) => onInterim(channel, text),
       onError,
@@ -448,6 +509,7 @@ function createStreamingSTT(settings, channel, callbacks) {
 module.exports = {
   OpenAIRealtimeSTT,
   DeepgramStreamingSTT,
+  buildOpenAIRealtimeSession,
   createStreamingSTT,
   transcribeBatchOpenAI,
   transcribeBatchGemini

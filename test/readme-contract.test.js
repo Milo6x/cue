@@ -53,3 +53,10 @@ test('README documents Auto streaming preference and its Gemini batch fallback',
   excludes(readme, /then available batch providers/i, 'README must not claim an unspecified batch fallback');
   includes(readme, /### 2\. Grant Windows microphone permission/, 'README must separate Windows permission guidance');
 });
+
+test('README documents the current OpenAI live transcription accuracy defaults', () => {
+  const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+
+  includes(readme, /gpt-live-transcribe/i, 'README must name the current OpenAI realtime transcription model');
+  includes(readme, /medium.*accuracy|accuracy.*medium/i, 'README must document the OpenAI realtime accuracy/latency default');
+});
