@@ -140,6 +140,8 @@ Chat/AI and speech-to-text are separate settings. Open **Settings** from the `..
 
 Deepgram and OpenAI are streaming choices when their selected/available credentials permit it. OpenAI streaming uses `gpt-live-transcribe` with an English language hint, a vocabulary context built from your Profile resume and job description, and `medium` delay as the balanced accuracy/latency default. Gemini is batch transcription. In batch mode, the current Auto chain tries configured OpenAI, Groq, then Gemini credentials in that order, including after a streaming error. Local mode loads one selected whisper.cpp model for both You and Meeting, keeps audio on the computer, and reports local errors instead of silently sending audio to a cloud provider. An Anthropic, Custom, Ollama, MiniMax, or Azure AI chat configuration does not itself provide speech-to-text; configure one of the transcription choices separately.
 
+For chat answers, cue starts official OpenAI requests with `max_completion_tokens` and preserves `max_tokens` for OpenAI-compatible Custom, Groq, and MiniMax endpoints. Azure keeps its existing `max_completion_tokens` transport. If an OpenAI request is rejected before streaming with the provider's explicit unsupported-token-limit response, cue retries once with `max_tokens` for a legacy model; it never retries after a response token has streamed.
+
 ### 4. Start listening, then ask manually
 
 1. Click the Start/stop listening button in the top bar.

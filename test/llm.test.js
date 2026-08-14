@@ -6,9 +6,11 @@ const { OPTIONAL_API_KEY_PLACEHOLDER } = require('../src/openai-compatible');
 let capturedClientOptions = null;
 let capturedCompletionRequest = null;
 let capturedCompletionOptions = null;
+let capturedCompletionRequests = null;
 let capturedAnthropicRequestOptions = null;
 let capturedGeminiRequest = null;
-let openAICompletionError = null;
+let openAICompletionErrors = null;
+let openAICompletionStream = null;
 const originalModuleLoad = Module._load;
 
 Module._load = function loadWithOpenAIStub(request, parent, isMain) {
@@ -21,7 +23,9 @@ Module._load = function loadWithOpenAIStub(request, parent, isMain) {
             create: async (completionRequest, completionOptions) => {
               capturedCompletionRequest = completionRequest;
               capturedCompletionOptions = completionOptions;
-              if (openAICompletionError) throw openAICompletionError;
+              capturedCompletionRequests.push({ completionRequest, completionOptions });
+              if (openAICompletionErrors.length) throw openAICompletionErrors.shift();
+              if (openAICompletionStream) return openAICompletionStream;
               return [{ choices: [{ delta: { content: 'ok' } }] }];
             }
           }
@@ -58,7 +62,14 @@ Module._load = function loadWithOpenAIStub(request, parent, isMain) {
   return originalModuleLoad.call(this, request, parent, isMain);
 };
 
-const { createLLM, consumeGeminiStream, formatProviderErrorMessage, isQuotaError, CURRENT_GEMINI_DEFAULT } = require('../src/llm');
+const {
+  createLLM,
+  completionTokenLimitParameter,
+  consumeGeminiStream,
+  formatProviderErrorMessage,
+  isQuotaError,
+  CURRENT_GEMINI_DEFAULT
+} = require('../src/llm');
 const { ProviderRequestError } = require('../src/provider-errors');
 
 test.after(() => {
@@ -80,9 +91,11 @@ test.beforeEach(() => {
   capturedClientOptions = null;
   capturedCompletionRequest = null;
   capturedCompletionOptions = null;
+  capturedCompletionRequests = [];
   capturedAnthropicRequestOptions = null;
   capturedGeminiRequest = null;
-  openAICompletionError = null;
+  openAICompletionErrors = [];
+  openAICompletionStream = null;
 });
 
 test('routes the Custom provider through the configured OpenAI-compatible endpoint', async () => {
@@ -103,6 +116,8 @@ test('routes the Custom provider through the configured OpenAI-compatible endpoi
     baseURL: 'http://127.0.0.1:18789/v1'
   });
   assert.equal(capturedCompletionRequest.model, 'openclaw/default');
+  assert.equal(capturedCompletionRequest.max_tokens, 700);
+  assert.equal('max_completion_tokens' in capturedCompletionRequest, false);
   assert.equal(response, 'ok');
   assert.deepEqual(receivedTokens, ['ok']);
 });
@@ -255,6 +270,82 @@ test('does not apply the Custom Base URL to official OpenAI requests', async () 
   await llm.stream({ system: '', turns: [], onToken: () => {} });
 
   assert.deepEqual(capturedClientOptions, { apiKey: 'official-openai-key' });
+  assert.equal(capturedCompletionRequest.max_completion_tokens, 700);
+  assert.equal('max_tokens' in capturedCompletionRequest, false);
+});
+
+test('uses max_completion_tokens for current official OpenAI chat models', async () => {
+  const controller = new AbortController();
+  const llm = createLLM({
+    provider: 'openai',
+    smart: false,
+    apiKeys: { openai: 'official-openai-key' },
+    models: { openai: { fast: 'gpt-5.6-luna', smart: 'gpt-5.6-luna' } }
+  });
+
+  await llm.stream({ system: '', turns: [], onToken: () => {}, signal: controller.signal });
+
+  assert.equal(capturedCompletionRequest.max_completion_tokens, 700);
+  assert.equal('max_tokens' in capturedCompletionRequest, false);
+  assert.equal(capturedCompletionOptions.signal, controller.signal);
+});
+
+test('keeps compatible token-limit fields deterministic by provider and model', () => {
+  assert.equal(completionTokenLimitParameter('openai', 'gpt-5.6-luna'), 'max_completion_tokens');
+  assert.equal(completionTokenLimitParameter('openai', 'gpt-4o-mini'), 'max_completion_tokens');
+  assert.equal(completionTokenLimitParameter('custom', 'gpt-5.6-luna'), 'max_tokens');
+  assert.equal(completionTokenLimitParameter('groq', 'gpt-5.6-luna'), 'max_tokens');
+  assert.equal(completionTokenLimitParameter('minimax', 'MiniMax-M3'), 'max_tokens');
+  assert.equal(completionTokenLimitParameter('azure', 'gpt-5.6-luna'), 'max_completion_tokens');
+});
+
+test('retries max_tokens only when OpenAI rejects max_completion_tokens before streaming', async () => {
+  const controller = new AbortController();
+  const unsupportedParameter = Object.assign(
+    new Error("Unsupported parameter: 'max_completion_tokens' is not supported with this model. Use 'max_tokens' instead."),
+    { status: 400 }
+  );
+  openAICompletionErrors.push(unsupportedParameter);
+  const llm = createLLM({
+    provider: 'openai',
+    smart: false,
+    apiKeys: { openai: 'official-openai-key' },
+    models: { openai: { fast: 'gpt-5.6-luna', smart: 'gpt-5.6-luna' } }
+  });
+
+  await llm.stream({ system: '', turns: [], onToken: () => {}, signal: controller.signal });
+
+  assert.equal(capturedCompletionRequests.length, 2);
+  assert.equal(capturedCompletionRequests[0].completionRequest.max_completion_tokens, 700);
+  assert.equal('max_tokens' in capturedCompletionRequests[0].completionRequest, false);
+  assert.equal(capturedCompletionRequests[1].completionRequest.max_tokens, 700);
+  assert.equal('max_completion_tokens' in capturedCompletionRequests[1].completionRequest, false);
+  assert.equal(capturedCompletionRequests[1].completionOptions.signal, controller.signal);
+});
+
+test('does not retry an OpenAI request after a token has streamed', async () => {
+  const unsupportedParameter = Object.assign(
+    new Error("Unsupported parameter: 'max_completion_tokens' is not supported with this model. Use 'max_tokens' instead."),
+    { status: 400 }
+  );
+  openAICompletionStream = (async function* () {
+    yield { choices: [{ delta: { content: 'first' } }] };
+    throw unsupportedParameter;
+  })();
+  const receivedTokens = [];
+  const llm = createLLM({
+    provider: 'openai',
+    smart: false,
+    apiKeys: { openai: 'official-openai-key' },
+    models: { openai: { fast: 'gpt-5.6-luna', smart: 'gpt-5.6-luna' } }
+  });
+
+  await assert.rejects(
+    () => llm.stream({ system: '', turns: [], onToken: token => receivedTokens.push(token) })
+  );
+
+  assert.deepEqual(receivedTokens, ['first']);
+  assert.equal(capturedCompletionRequests.length, 1);
 });
 
 test('reports incomplete Custom endpoint settings without making a request', () => {
@@ -284,7 +375,7 @@ test('createLLM: incomplete settings reject with a categorized configuration err
 });
 
 test('createLLM: wraps an OpenAI-compatible network failure with retry metadata', async () => {
-  openAICompletionError = new Error('socket hang up');
+  openAICompletionErrors.push(new Error('socket hang up'));
   const llm = createLLM(createCustomSettings());
 
   await assert.rejects(

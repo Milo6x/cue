@@ -51,6 +51,48 @@ const MINIMAX_BASE_URLS = {
   cn_zh: 'https://api.minimaxi.com/v1'
 };
 
+function completionTokenLimitParameter(provider, model) {
+  if (provider === 'azure') return 'max_completion_tokens';
+  // Official Chat Completions accepts the current field; a selected legacy
+  // model gets the explicit, pre-stream fallback in createOpenAICompletionStream.
+  if (provider === 'openai') return 'max_completion_tokens';
+  return 'max_tokens';
+}
+
+function buildOpenAICompletionRequest({ provider, model, messages, maxTokens }) {
+  return {
+    model,
+    messages,
+    stream: true,
+    [completionTokenLimitParameter(provider, model)]: maxTokens
+  };
+}
+
+function isUnsupportedCompletionTokenLimitError(error) {
+  const status = Number(error && error.status);
+  const message = String((error && error.message) || '');
+  return status === 400
+    && /unsupported parameter:\s*['"]max_completion_tokens['"]/i.test(message)
+    && /use\s+['"]max_tokens['"]/i.test(message);
+}
+
+async function createOpenAICompletionStream(client, request, signal) {
+  try {
+    return await client.chat.completions.create(request, { signal });
+  } catch (error) {
+    if (!Object.prototype.hasOwnProperty.call(request, 'max_completion_tokens') || !isUnsupportedCompletionTokenLimitError(error)) {
+      throw error;
+    }
+
+    // A 400 rejects the request before a completion exists, so this is safe to
+    // retry. Streaming/iteration is intentionally outside this catch: once a
+    // token is delivered, repeating an answer would be non-idempotent.
+    const fallbackRequest = { ...request, max_tokens: request.max_completion_tokens };
+    delete fallbackRequest.max_completion_tokens;
+    return client.chat.completions.create(fallbackRequest, { signal });
+  }
+}
+
 function stripDataUrl(dataUrl) {
   const m = /^data:(.+?);base64,(.*)$/s.exec(dataUrl || '');
   return m ? { mime: m[1], b64: m[2] } : null;
@@ -75,7 +117,7 @@ function throwIfAborted(signal) {
   throw cancelledError();
 }
 
-async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken, signal }) {
+async function streamOpenAI({ provider, apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken, signal }) {
   const OpenAI = require('openai');
   const client = new OpenAI(baseURL ? { apiKey, baseURL } : { apiKey });
   const messages = [{ role: 'system', content: system }];
@@ -92,7 +134,11 @@ async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUr
       messages.push({ role: t.role, content: t.text });
     }
   });
-  const stream = await client.chat.completions.create({ model, messages, stream: true, max_tokens: maxTokens }, { signal });
+  const stream = await createOpenAICompletionStream(
+    client,
+    buildOpenAICompletionRequest({ provider, model, messages, maxTokens }),
+    signal
+  );
   let full = '';
   for await (const part of stream) {
     const d = part.choices && part.choices[0] && part.choices[0].delta && part.choices[0].delta.content;
@@ -142,7 +188,11 @@ async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxToke
     };
     client = new OpenAI({ baseURL: url, apiKey, fetch: azureFetch });
   }
-  const stream = await client.chat.completions.create({ model, messages, stream: true, max_completion_tokens: maxTokens }, { signal });
+  const stream = await createOpenAICompletionStream(
+    client,
+    buildOpenAICompletionRequest({ provider: 'azure', model, messages, maxTokens }),
+    signal
+  );
   let full = '';
   for await (const part of stream) {
     const d = part.choices && part.choices[0] && part.choices[0].delta && part.choices[0].delta.content;
@@ -348,11 +398,11 @@ function createLLM(settings) {
       }
       const args = { apiKey, baseURL, endpoint, model, maxTokens, ...params, turns: sanitizeTurns(params.turns) };
       try {
-        if (provider === 'openai') return await streamOpenAI(args);
-        if (provider === CUSTOM_PROVIDER) return await streamOpenAI(args);
+        if (provider === 'openai') return await streamOpenAI({ ...args, provider });
+        if (provider === CUSTOM_PROVIDER) return await streamOpenAI({ ...args, provider });
         if (provider === 'ollama') return await streamOllama(args);
-        if (provider === 'groq') return await streamOpenAI({ ...args, baseURL: 'https://api.groq.com/openai/v1' });
-        if (provider === 'minimax') return await streamOpenAI({ ...args, baseURL: MINIMAX_BASE_URLS[minimaxRegion] || MINIMAX_BASE_URLS.global_en });
+        if (provider === 'groq') return await streamOpenAI({ ...args, provider, baseURL: 'https://api.groq.com/openai/v1' });
+        if (provider === 'minimax') return await streamOpenAI({ ...args, provider, baseURL: MINIMAX_BASE_URLS[minimaxRegion] || MINIMAX_BASE_URLS.global_en });
         if (provider === 'anthropic') return await streamAnthropic(args);
         if (provider === 'gemini') return await streamGemini(args);
         if (provider === 'azure') return await streamAzure(args);
@@ -365,4 +415,11 @@ function createLLM(settings) {
   };
 }
 
-module.exports = { createLLM, consumeGeminiStream, formatProviderErrorMessage, isQuotaError, CURRENT_GEMINI_DEFAULT };
+module.exports = {
+  createLLM,
+  completionTokenLimitParameter,
+  consumeGeminiStream,
+  formatProviderErrorMessage,
+  isQuotaError,
+  CURRENT_GEMINI_DEFAULT
+};
