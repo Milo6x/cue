@@ -5,6 +5,7 @@ node_modules/
 dist/
 out/
 .cache/
+.worktrees/
 
 # Native binaries
 native/systemaudio
