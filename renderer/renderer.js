@@ -1325,6 +1325,7 @@
   const DIAGNOSTICS_STATE_CLASSES = new Set(['neutral', 'ok', 'warn', 'error']);
   let diagnosticsSummary = '';
   let diagnosticsFetchVersion = 0;
+  let diagnosticsSessionVersion = 0;
   let diagnosticsCopyTimer = null;
 
   function diagnosticOwn(value, key) {
@@ -1418,6 +1419,12 @@
     if (button) button.disabled = !diagnosticsSummary;
   }
 
+  function isCurrentDiagnosticsSession(sessionVersion, summary) {
+    return sessionVersion === diagnosticsSessionVersion
+      && !scrim.classList.contains('hidden')
+      && summary === diagnosticsSummary;
+  }
+
   async function refreshDiagnostics() {
     const requestVersion = ++diagnosticsFetchVersion;
     clearTimeout(diagnosticsCopyTimer);
@@ -1440,12 +1447,14 @@
   }
 
   function openSettings() {
+    diagnosticsSessionVersion += 1;
     fillSettings();
     scrim.classList.remove('hidden');
     refreshWhisperModels();
     void refreshDiagnostics();
   }
   function closeSettings() {
+    diagnosticsSessionVersion += 1;
     diagnosticsFetchVersion += 1;
     saveSettings();
     scrim.classList.add('hidden');
@@ -1457,18 +1466,24 @@
   $('#diagnostics-copy').addEventListener('click', async () => {
     const button = $('#diagnostics-copy');
     if (!diagnosticsSummary || !button) return;
+    const copySessionVersion = diagnosticsSessionVersion;
+    const copySummary = diagnosticsSummary;
     button.disabled = true;
     button.textContent = 'Copying…';
     try {
-      await navigator.clipboard.writeText(diagnosticsSummary);
+      await navigator.clipboard.writeText(copySummary);
+      if (!isCurrentDiagnosticsSession(copySessionVersion, copySummary)) return;
       button.textContent = 'Copied';
       setDiagnosticsCopyStatus('Safe diagnostic summary copied to clipboard.', 'ok');
     } catch (_) {
+      if (!isCurrentDiagnosticsSession(copySessionVersion, copySummary)) return;
       button.textContent = 'Copy diagnostic summary';
       setDiagnosticsCopyStatus('Could not copy the diagnostic summary. Check clipboard access and try again.', 'error');
     } finally {
+      if (!isCurrentDiagnosticsSession(copySessionVersion, copySummary)) return;
       clearTimeout(diagnosticsCopyTimer);
       diagnosticsCopyTimer = setTimeout(() => {
+        if (!isCurrentDiagnosticsSession(copySessionVersion, copySummary)) return;
         if (!button) return;
         button.textContent = 'Copy diagnostic summary';
         button.disabled = !diagnosticsSummary;

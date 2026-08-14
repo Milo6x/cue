@@ -91,9 +91,26 @@ test('renderer exposes a compact, live diagnostics pane that copies only the sup
 
   assert.match(renderer, /cue\.diagnosticsGet\(\)/);
   assert.equal((renderer.match(/cue\.on\('diagnostics:changed'/g) || []).length, 1, 'subscribe only once');
-  assert.match(renderer, /navigator\.clipboard\.writeText\(diagnosticsSummary\)/);
+  assert.match(renderer, /const copySummary = diagnosticsSummary;/);
+  assert.match(renderer, /navigator\.clipboard\.writeText\(copySummary\)/);
   assert.doesNotMatch(renderer, /navigator\.clipboard\.writeText\([^)]*innerHTML/);
   assert.match(renderer, /DIAGNOSTICS_STATE_CLASSES/);
   assert.match(renderer, /aria-live/);
   assert.match(styles, /\.diagnostics-row/);
+});
+
+test('renderer ignores an old clipboard result after the diagnostics settings session changes', () => {
+  const renderer = read('renderer/renderer.js');
+  const openSettings = section(renderer, '  function openSettings() {', '  function closeSettings() {');
+  const closeSettings = section(renderer, '  function closeSettings() {', "  $('#more-btn').addEventListener");
+  const copyHandler = section(renderer, "  $('#diagnostics-copy').addEventListener", "  cue.on('diagnostics:changed'");
+
+  assert.match(renderer, /let diagnosticsSessionVersion = 0;/);
+  assert.match(openSettings, /diagnosticsSessionVersion \+= 1;/);
+  assert.match(closeSettings, /diagnosticsSessionVersion \+= 1;/);
+  assert.match(copyHandler, /const copySessionVersion = diagnosticsSessionVersion;/);
+  assert.match(copyHandler, /const copySummary = diagnosticsSummary;/);
+  assert.match(copyHandler, /navigator\.clipboard\.writeText\(copySummary\)/);
+  assert.match(copyHandler, /if \(!isCurrentDiagnosticsSession\(copySessionVersion, copySummary\)\) return;/);
+  assert.match(copyHandler, /setTimeout\(\(\) => \{\s*if \(!isCurrentDiagnosticsSession\(copySessionVersion, copySummary\)\) return;/);
 });
