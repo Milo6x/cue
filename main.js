@@ -28,7 +28,7 @@ const { requireWhisperModel } = require('./src/whisper-model-catalog');
 const { locateWhisperRuntime } = require('./src/whisper-runtime');
 const { LocalWhisperTranscriber } = require('./src/local-whisper-transcriber');
 const { createTranscriptLedger } = require('./src/transcript-ledger');
-const { createDiagnosticsStore } = require('./src/diagnostics');
+const { createDiagnosticsGetHandler, createDiagnosticsStore } = require('./src/diagnostics');
 
 let win = null;
 let remoteStopSeq = 0;
@@ -655,12 +655,12 @@ captureController = createCaptureTransitionController({
 ipcMain.handle('capture:set', (_event, active) => requestCaptureState(active));
 ipcMain.handle('capture:toggle', () => captureController.toggle());
 ipcMain.handle('capture:state', () => ({ active: state.capturing }));
-ipcMain.handle('diagnostics:get', async () => {
-  const status = await getPermissionStatus();
-  diagnostics.updatePermissions(status);
-  refreshDiagnosticsProviders();
-  return diagnostics.read();
-});
+ipcMain.handle('diagnostics:get', createDiagnosticsGetHandler({
+  getWindow: () => win,
+  getDiagnostics: () => diagnostics,
+  getPermissionStatus,
+  refreshProviders: refreshDiagnosticsProviders
+}));
 ipcMain.on('diagnostics:report', (event, report) => {
   if (diagnostics && win && !win.isDestroyed() && event.sender === win.webContents) diagnostics.report(report);
 });

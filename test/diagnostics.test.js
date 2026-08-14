@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-const { createDiagnosticsStore } = require('../src/diagnostics');
+const { createDiagnosticsGetHandler, createDiagnosticsStore } = require('../src/diagnostics');
 
 test('reports a fixed, credential-free runtime snapshot and summary', () => {
   const diagnostics = createDiagnosticsStore({ appVersion: '0.2.2', platform: 'darwin', arch: 'arm64' });
@@ -132,6 +132,46 @@ test('does not expose a credential-shaped renderer track label', () => {
   diagnostics.report({ type: 'capture', channel: 'microphone', state: 'ready', trackLabel: 'sk-private-track-label' });
 
   assert.equal(diagnostics.snapshot().capture.microphone.trackLabel, null);
+});
+
+test('rejects an oversized track label before trimming it into an allowed value', () => {
+  const diagnostics = createDiagnosticsStore({ appVersion: '1.0.0', platform: 'darwin', arch: 'arm64' });
+
+  diagnostics.report({
+    type: 'capture',
+    channel: 'microphone',
+    state: 'ready',
+    trackLabel: `${' '.repeat(121)}Built-in Microphone`
+  });
+
+  assert.equal(diagnostics.snapshot().capture.microphone.trackLabel, null);
+});
+
+test('diagnostics get handler serves only the live main renderer sender', async () => {
+  const webContents = { isDestroyed: () => false };
+  let currentWindow = { isDestroyed: () => false, webContents };
+  const diagnostics = createDiagnosticsStore({ appVersion: '1.0.0', platform: 'darwin', arch: 'arm64' });
+  let permissionReads = 0;
+  let providerRefreshes = 0;
+  const handler = createDiagnosticsGetHandler({
+    getWindow: () => currentWindow,
+    getDiagnostics: () => diagnostics,
+    getPermissionStatus: async () => { permissionReads += 1; return { mic: 'granted', screen: 'granted' }; },
+    refreshProviders: () => { providerRefreshes += 1; }
+  });
+
+  const result = await handler({ sender: webContents });
+  assert.deepEqual(result.snapshot.permissions, { microphone: 'granted', screen: 'granted' });
+  assert.equal(permissionReads, 1);
+  assert.equal(providerRefreshes, 1);
+
+  await assert.rejects(() => handler({ sender: {} }), /main cue window/i);
+  currentWindow = { isDestroyed: () => true, webContents };
+  await assert.rejects(() => handler({ sender: webContents }), /main cue window/i);
+  currentWindow = null;
+  await assert.rejects(() => handler({ sender: webContents }), /main cue window/i);
+  assert.equal(permissionReads, 1);
+  assert.equal(providerRefreshes, 1);
 });
 
 test('normalizes renderer failure detail to a fixed category recovery message', () => {

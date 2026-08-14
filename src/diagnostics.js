@@ -43,7 +43,7 @@ function safeId(value) {
 }
 
 function safeTrackLabel(value) {
-  if (typeof value !== 'string') return null;
+  if (typeof value !== 'string' || value.length > 120) return null;
   const label = value.trim();
   return SAFE_TRACK_LABEL_RE.test(label) && !UNSAFE_TEXT_RE.test(label) && redactSecrets(label) === label ? label : null;
 }
@@ -67,6 +67,28 @@ function cloneSnapshot(state) {
     chat: { ...state.chat },
     stt: { ...state.stt },
     lastFailure: state.lastFailure ? { ...state.lastFailure } : null
+  };
+}
+
+function createDiagnosticsGetHandler({ getWindow, getDiagnostics, getPermissionStatus, refreshProviders }) {
+  return async function diagnosticsGet(event) {
+    const currentWindow = getWindow();
+    const webContents = currentWindow && currentWindow.webContents;
+    const liveWindow = currentWindow
+      && typeof currentWindow.isDestroyed === 'function'
+      && !currentWindow.isDestroyed()
+      && webContents
+      && (typeof webContents.isDestroyed !== 'function' || !webContents.isDestroyed());
+    if (!liveWindow || !event || event.sender !== webContents) {
+      throw new Error('Diagnostics are only available from the main cue window.');
+    }
+
+    const diagnostics = getDiagnostics();
+    if (!diagnostics) throw new Error('Diagnostics are not ready.');
+    const status = await getPermissionStatus();
+    diagnostics.updatePermissions(status);
+    refreshProviders();
+    return diagnostics.read();
   };
 }
 
@@ -201,4 +223,4 @@ function createDiagnosticsStore({ appVersion, platform, arch, onChange } = {}) {
   };
 }
 
-module.exports = { createDiagnosticsStore };
+module.exports = { createDiagnosticsGetHandler, createDiagnosticsStore };
