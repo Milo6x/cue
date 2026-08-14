@@ -29,6 +29,7 @@
     "cross-platform"
   ],
   "devDependencies": {
+    "@electron/asar": "^3.4.1",
     "electron": "33.2.1",
     "electron-builder": "^26.15.3",
     "extract-zip": "^2.0.1",

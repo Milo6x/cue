@@ -27,6 +27,7 @@ test('dist/pack scripts do not pass an inline --config that could bypass electro
 
 test('package exposes the macOS application verifier', () => {
   assert.equal(pkg.scripts['verify:mac-app'], 'node scripts/verify-macos-app.js');
+  assert.match(pkg.devDependencies['@electron/asar'], /^\^3\.4\.1$/);
 });
 
 test('mac config never auto-publishes and only claims hardened runtime / notarization with a real cert', () => {
@@ -44,7 +45,7 @@ test('mac config never auto-publishes and only claims hardened runtime / notariz
     assert.equal(unsigned.publish, null);
     // No cert -> must not claim hardened runtime or notarization (would
     // otherwise fail the build outright, or worse, silently no-op).
-    assert.equal(unsigned.mac.identity, null);
+    assert.equal(unsigned.mac.identity, '-');
     assert.equal(unsigned.mac.hardenedRuntime, false);
     assert.equal(unsigned.mac.notarize, false);
 
@@ -83,6 +84,7 @@ test('packaging allowlist includes the renderer and source reliability modules',
   const builder = require('../electron-builder.cjs');
   assert.ok(builder.files.includes('renderer/**/*'));
   assert.ok(builder.files.includes('src/**/*'));
+  assert.equal(builder.asar, false);
   for (const modulePath of [
     'renderer/capture-coordinator.js',
     'src/diagnostics.js',

@@ -22,7 +22,7 @@ function writeInfoPlist(appPath, bundleIdentifier = 'com.cue.overlay') {
   );
 }
 
-function makeSignedApp(bundleIdentifier) {
+function makeSignedApp({ bundleIdentifier = 'com.cue.overlay', useAsar = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cue-mac-package-'));
   const appPath = path.join(directory, 'cue.app');
   const contents = path.join(appPath, 'Contents');
@@ -34,10 +34,21 @@ function makeSignedApp(bundleIdentifier) {
     path.join(contents, 'MacOS', 'cue'),
     fs.constants.COPYFILE_FICLONE,
   );
+  const moduleRoot = path.join(directory, 'reliability-modules');
   for (const modulePath of requiredModules) {
-    const target = path.join(contents, 'Resources', 'app', modulePath);
+    const target = path.join(moduleRoot, modulePath);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, '// packaged reliability module\n');
+  }
+  if (useAsar) {
+    execFileSync(process.execPath, [
+      require.resolve('@electron/asar/bin/asar.js'),
+      'pack',
+      moduleRoot,
+      path.join(contents, 'Resources', 'app.asar'),
+    ]);
+  } else {
+    fs.cpSync(moduleRoot, path.join(contents, 'Resources', 'app'), { recursive: true });
   }
   execFileSync('codesign', ['--force', '--sign', '-', '--deep', appPath]);
   return { directory, appPath };
@@ -70,10 +81,60 @@ test('macOS package verifier names a missing reliability module', (t) => {
 
 test('macOS package verifier rejects an unexpected bundle identifier', (t) => {
   if (process.platform !== 'darwin') t.skip('requires macOS packaging tools');
-  const fixture = makeSignedApp('example.invalid');
+  const fixture = makeSignedApp({ bundleIdentifier: 'example.invalid' });
   t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
 
   const result = verify(fixture.appPath);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /com\.cue\.overlay/);
+});
+
+test('macOS package verifier proves reliability modules inside app.asar', (t) => {
+  if (process.platform !== 'darwin') t.skip('requires macOS packaging tools');
+  const fixture = makeSignedApp({ useAsar: true });
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+
+  const result = verify(fixture.appPath);
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('macOS package verifier rejects a symlinked reliability module', (t) => {
+  if (process.platform !== 'darwin') t.skip('requires macOS packaging tools');
+  const fixture = makeSignedApp();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const modulePath = path.join(fixture.appPath, 'Contents', 'Resources', 'app', 'src', 'request-policy.js');
+  const outsidePath = path.join(fixture.directory, 'request-policy.js');
+  fs.renameSync(modulePath, outsidePath);
+  fs.symlinkSync(outsidePath, modulePath);
+
+  const result = verify(fixture.appPath);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /reliability module must not be a symlink: src\/request-policy\.js/);
+});
+
+test('macOS package verifier does not let app.asar mask a symlinked loose module', (t) => {
+  if (process.platform !== 'darwin') t.skip('requires macOS packaging tools');
+  const fixture = makeSignedApp({ useAsar: true });
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const looseModule = path.join(fixture.appPath, 'Contents', 'Resources', 'app', 'src', 'request-policy.js');
+  const outsidePath = path.join(fixture.directory, 'request-policy.js');
+  fs.mkdirSync(path.dirname(looseModule), { recursive: true });
+  fs.writeFileSync(outsidePath, '// outside package\n');
+  fs.symlinkSync(outsidePath, looseModule);
+
+  const result = verify(fixture.appPath);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /reliability module must not be a symlink: src\/request-policy\.js/);
+});
+
+test('macOS package verifier rejects a symlinked app bundle path', (t) => {
+  if (process.platform !== 'darwin') t.skip('requires macOS packaging tools');
+  const fixture = makeSignedApp();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const symlinkPath = path.join(fixture.directory, 'linked-cue.app');
+  fs.symlinkSync(fixture.appPath, symlinkPath);
+
+  const result = verify(symlinkPath);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /must not be a symlink/);
 });

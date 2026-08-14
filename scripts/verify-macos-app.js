@@ -37,10 +37,36 @@ function readPlistValue(infoPlist, key) {
 
 function isRegularFile(filePath) {
   try {
-    return fs.statSync(filePath).isFile();
+    return fs.lstatSync(filePath).isFile();
   } catch {
     return false;
   }
+}
+
+function isDirectory(filePath) {
+  try {
+    return fs.lstatSync(filePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isSymlink(filePath) {
+  try {
+    return fs.lstatSync(filePath).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function requireDirectory(directoryPath, label) {
+  if (isSymlink(directoryPath)) fail(`${label} must not be a symlink: ${directoryPath}`);
+  if (!isDirectory(directoryPath)) fail(`missing directory for ${label}: ${directoryPath}`);
+}
+
+function requireRegularFile(filePath, label) {
+  if (isSymlink(filePath)) fail(`${label} must not be a symlink: ${filePath}`);
+  if (!isRegularFile(filePath)) fail(`missing or malformed ${label}: ${filePath}`);
 }
 
 function isExecutableFile(filePath) {
@@ -58,6 +84,12 @@ function findMissingModules(resourcesPath) {
   const archivePath = path.join(resourcesPath, 'app.asar');
   let archiveEntries = new Set();
 
+  if (isSymlink(appPath)) fail(`resources app directory must not be a symlink: ${appPath}`);
+  if (isSymlink(archivePath)) fail(`app.asar must not be a symlink: ${archivePath}`);
+  if (isSymlink(`${archivePath}.unpacked`)) {
+    fail(`app.asar.unpacked directory must not be a symlink: ${archivePath}.unpacked`);
+  }
+
   if (isRegularFile(archivePath)) {
     try {
       const { listPackage } = require('@electron/asar');
@@ -68,8 +100,13 @@ function findMissingModules(resourcesPath) {
   }
 
   return requiredModules.filter((modulePath) => {
-    return !isRegularFile(path.join(appPath, modulePath)) &&
-      !isRegularFile(path.join(`${archivePath}.unpacked`, modulePath)) &&
+    const looseModule = path.join(appPath, modulePath);
+    const unpackedModule = path.join(`${archivePath}.unpacked`, modulePath);
+    if (isSymlink(looseModule) || isSymlink(unpackedModule)) {
+      fail(`reliability module must not be a symlink: ${modulePath}`);
+    }
+    return !isRegularFile(looseModule) &&
+      !isRegularFile(unpackedModule) &&
       !archiveEntries.has(modulePath);
   });
 }
@@ -78,13 +115,15 @@ function verifyMacApp(appPath) {
   if (process.platform !== 'darwin') fail('macOS app verification requires macOS');
   const resolvedApp = path.resolve(appPath);
   if (!fs.existsSync(resolvedApp)) fail(`app bundle does not exist: ${resolvedApp}`);
-  if (!fs.statSync(resolvedApp).isDirectory() || path.extname(resolvedApp) !== '.app') {
+  if (isSymlink(resolvedApp)) fail(`app bundle must not be a symlink: ${resolvedApp}`);
+  if (!isDirectory(resolvedApp) || path.extname(resolvedApp) !== '.app') {
     fail(`expected a .app bundle directory: ${resolvedApp}`);
   }
 
   const contentsPath = path.join(resolvedApp, 'Contents');
   const infoPlist = path.join(contentsPath, 'Info.plist');
-  if (!isRegularFile(infoPlist)) fail(`missing Info.plist: ${infoPlist}`);
+  requireDirectory(contentsPath, 'Contents');
+  requireRegularFile(infoPlist, 'Info.plist');
 
   const bundleIdentifier = readPlistValue(infoPlist, 'CFBundleIdentifier');
   if (bundleIdentifier !== expectedBundleIdentifier) {
@@ -95,7 +134,10 @@ function verifyMacApp(appPath) {
   if (path.basename(executableName) !== executableName) {
     fail(`malformed CFBundleExecutable in Info.plist: ${JSON.stringify(executableName)}`);
   }
-  const executable = path.join(contentsPath, 'MacOS', executableName);
+  const macOSPath = path.join(contentsPath, 'MacOS');
+  requireDirectory(macOSPath, 'Contents/MacOS');
+  const executable = path.join(macOSPath, executableName);
+  if (isSymlink(executable)) fail(`bundle binary must not be a symlink: ${executable}`);
   if (!isExecutableFile(executable)) {
     fail(`missing or non-executable bundle binary: ${executable}`);
   }
@@ -105,7 +147,9 @@ function verifyMacApp(appPath) {
     fail(`bundle binary must include arm64, found: ${architectures.join(' ') || 'none'}`);
   }
 
-  const missingModules = findMissingModules(path.join(contentsPath, 'Resources'));
+  const resourcesPath = path.join(contentsPath, 'Resources');
+  requireDirectory(resourcesPath, 'Contents/Resources');
+  const missingModules = findMissingModules(resourcesPath);
   if (missingModules.length) {
     fail(`missing required reliability module(s): ${missingModules.join(', ')}`);
   }

@@ -9,8 +9,8 @@
  *     signs with the hardened runtime, notarizes, and staples. The app then
  *     opens on the first double-click with no warning at all.
  *
- *   • Ad-hoc fallback (no cert) — identity:null, so a fork or a secret-less CI
- *     run still produces a valid (not "damaged") build. It is NOT distributable:
+ *   • Ad-hoc fallback (no cert) — identity:"-", so a fork or a secret-less CI
+ *     run still produces a valid locally launchable build. It is NOT distributable:
  *     macOS refuses it after a download, and since macOS 15 the old
  *     right-click → Open escape hatch is gone.
  */
@@ -42,9 +42,9 @@ module.exports = {
     target: [{ target: "zip", arch: ["x64", "arm64"] }],
     category: "public.app-category.productivity",
     // With a real cert, let electron-builder discover it and apply the hardened
-    // runtime (notarization is refused without it). Without one, identity:null
-    // makes it skip signing rather than fail.
-    identity: hasCert ? undefined : null,
+    // runtime (notarization is refused without it). Without one, "-" requests
+    // a local ad-hoc signature rather than leaving the app bundle unsigned.
+    identity: hasCert ? undefined : '-',
     hardenedRuntime: hasCert,
     gatekeeperAssess: false,
     entitlements: "build-resources/entitlements.mac.plist",
