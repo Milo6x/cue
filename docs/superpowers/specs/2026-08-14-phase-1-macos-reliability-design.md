@@ -1,8 +1,8 @@
 # Phase 1 macOS Reliability Design
 
-**Status:** Approved in conversation on 2026-08-14  
-**Target:** Apple Silicon macOS, starting from cue `f8d743a`  
-**Repository:** `Milo6x/cue`  
+**Status:** Approved in conversation on 2026-08-14
+**Target:** Apple Silicon macOS, starting from cue `f8d743a`
+**Repository:** `Milo6x/cue`
 **Branch:** `codex/phase1-macos-reliability`
 
 ## Goal
