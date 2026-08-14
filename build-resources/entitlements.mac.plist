@@ -21,6 +21,6 @@
   <true/>
 
   <!-- Not sandboxed: the always-on-top overlay and screen capture need it off.
-       Screen Recording is a TCC prompt, not an entitlement. -->
+       Screen & System Audio Recording is a TCC prompt, not an entitlement. -->
 </dict>
 </plist>

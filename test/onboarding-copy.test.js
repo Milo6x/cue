@@ -19,3 +19,18 @@ test('shipped copy describes screen-share protection as best effort without plat
   assert.match(main, /best-effort screen-capture exclusion\/content protection/i);
   assert.match(main, /Verify before sharing sensitive content/i);
 });
+
+test('macOS permission copy uses Screen & System Audio Recording while Windows onboarding asks only for microphone', () => {
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+  const permissionsPage = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'permissions.html'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+
+  assert.match(main, /grant Screen & System Audio Recording to cue in System Settings/i);
+  assert.match(renderer, /Screen & System Audio Recording/);
+  assert.match(permissionsPage, /Screen & System Audio Recording/);
+  assert.doesNotMatch(renderer, /Open Screen recording settings/i);
+  assert.doesNotMatch(renderer, /ms-settings:privacy-screenrecorder/i);
+  assert.doesNotMatch(renderer, /Screen recording/i);
+  assert.match(renderer, /const permissionRequirements = isWindows/);
+  assert.match(renderer, /cue needs microphone permission to hear you/i);
+});

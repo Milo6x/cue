@@ -597,7 +597,7 @@ async function runFeature(mode, userText) {
         recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'captureScreenshot', context: { mode } });
         recordDiagnosticsFailure('capture', e);
         const message = process.platform === 'darwin'
-          ? 'Screen capture needs permission — grant Screen Recording to cue in System Settings.'
+          ? 'Screen capture needs permission — grant Screen & System Audio Recording to cue in System Settings.'
           : process.platform === 'win32'
             ? 'Screen capture failed. Make sure cue is not blocked by Windows privacy or security software, then try again.'
             : 'Screen capture failed. Check your desktop capture permissions, then try again.';
@@ -779,7 +779,7 @@ function registerShortcuts() {
 
 // -------- permissions --------
 // systemPreferences.getMediaAccessStatus('screen') is unreliable: it can return
-// 'not-determined' or 'denied' even after the user has granted Screen Recording,
+// 'not-determined' or 'denied' even after the user has granted Screen & System Audio Recording,
 // especially in dev mode (unsigned / no proper app bundle).  As a fallback we
 // actually attempt a capture and inspect the thumbnail — if it contains any
 // non-zero pixel data, macOS is giving us real screen content, i.e. granted.
@@ -820,7 +820,7 @@ async function requestPermissions() {
     await systemPreferences.askForMediaAccess('microphone');
   }
 
-  // Trigger the macOS screen-recording permission dialog (first-use only).
+  // Trigger the macOS Screen & System Audio Recording permission dialog (first-use only).
   // There is no askForMediaAccess('screen'), but attempting to enumerate
   // sources via desktopCapturer will cause macOS to prompt the user.
   const screenStatus = await verifyScreenAccess();

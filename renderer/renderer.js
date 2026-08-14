@@ -2060,17 +2060,19 @@
   // ---- onboarding / first-run tutorial -----------------------------------
   const obScrim = $('#onboard-scrim');
   const permissionHelp = isWindows
-    ? 'cue needs permission to see and hear. Open Windows Privacy & security settings, allow <strong>Microphone</strong> and <strong>Screen recording</strong> for cue, then come back here.'
+    ? 'cue needs microphone permission to hear you. Open Windows Privacy &amp; security settings, allow <strong>Microphone</strong> for cue, then come back here.'
     : 'cue needs two macOS permissions. Click each button, turn <strong>cue</strong> ON in the window that opens, then come back here.';
   const permissionButtons = isWindows
     ? [
-        { label: 'Open Microphone settings', action: () => cue.openPane('ms-settings:privacy-microphone') },
-        { label: 'Open Screen recording settings', action: () => cue.openPane('ms-settings:privacy-screenrecorder') }
+        { label: 'Open Microphone settings', action: () => cue.openPane('ms-settings:privacy-microphone') }
       ]
     : [
         { label: 'Open Microphone settings', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone') },
-        { label: 'Open Screen Recording settings', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture') }
+        { label: 'Open Screen & System Audio Recording settings', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture') }
       ];
+  const permissionRequirements = isWindows
+    ? '<ul><li><strong>Microphone</strong> — to hear you</li></ul>'
+    : '<ul><li><strong>Microphone</strong> — to hear you</li><li><strong>Screen &amp; System Audio Recording</strong> — to see your screen and hear meeting audio</li></ul>';
   const assistShortcut = isWindows ? '<span class="kbd">Ctrl</span> <span class="kbd">↵</span>' : '<span class="kbd">⌘</span> <span class="kbd">↵</span>';
   const solveShortcut = isWindows ? '<span class="kbd">Ctrl</span> <span class="kbd">H</span>' : '<span class="kbd">⌘</span> <span class="kbd">H</span>';
   const quitShortcut = isWindows ? '<span class="kbd">Ctrl</span><span class="kbd">⇧</span><span class="kbd">X</span>' : '<span class="kbd">⌘</span><span class="kbd">⇧</span><span class="kbd">X</span>';
@@ -2083,7 +2085,7 @@
     {
       icon: '🔐',
       title: 'Allow cue to see & hear',
-      body: permissionHelp + '<ul><li><strong>Microphone</strong> — to hear you</li><li><strong>Screen recording</strong> — to see your screen and hear meeting audio</li></ul>',
+      body: permissionHelp + permissionRequirements,
       buttons: permissionButtons
     },
     {
@@ -2130,7 +2132,6 @@
   // ---- boot --------------------------------------------------------------
   (async function boot() {
     settings = await cue.settingsGet();
-    const platformInfo = await cue.platformInfo();
 
     // R4: shortcut hints
     const sayHintEl = document.getElementById('say-shortcut-hint');
@@ -2142,17 +2143,6 @@
     updatePrepStatus();
     // R6: smart tooltip
     updateSmartTooltip();
-    // Fix 3: Adjust permission buttons based on actual Windows version.
-    // ms-settings:privacy-screenrecorder only exists on Windows 11.
-    // On Windows 10, screen capture needs no permission — so replace the button
-    // with a more helpful note instead of an invalid settings link.
-    if (isWindows && platformInfo.winBuild > 0 && platformInfo.winBuild < 22000) {
-      // Windows 10: update the onboarding screen recording button to be more helpful
-      const ob = OB_STEPS[1];
-      ob.buttons = ob.buttons.filter((b) => !b.label.toLowerCase().includes('screen'));
-      ob.body = 'cue needs microphone permission to hear you. Click the button below to open Windows microphone settings and allow cue.<br><br><strong>Screen capture works automatically on Windows 10</strong> — no additional permission needed.<ul><li><strong>Microphone</strong> — to hear you</li><li><strong>Screen recording</strong> — works automatically on Windows 10</li></ul>';
-    }
-
     smartBtn.classList.toggle('on', !!settings.smart);
     showExample();
     syncPlaceholder();

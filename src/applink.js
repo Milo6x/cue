@@ -4,7 +4,7 @@
 // screen and whatever had already been written to a log file. Neither answers
 // the question people actually report — "it isn't listening any more" — because
 // the reason is in memory: a 403 from the speech model, a shortcut another app
-// grabbed first, a Screen Recording grant that was never given.
+// grabbed first, a Screen & System Audio Recording grant that was never given.
 //
 // So cue answers questions instead. Nothing is exposed until the user says yes,
 // and the transcript never leaves this process; see `describeState` below.
