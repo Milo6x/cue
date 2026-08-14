@@ -10,7 +10,6 @@
   $('#logo-btn').innerHTML = icon('logo', { size: 18 });
   $('.tb-hide .chev').innerHTML = icon('chevron-down', { size: 14 });
   $('#stop-btn').innerHTML = icon('stop-square', { size: 15 });
-  $('#quit-btn').innerHTML = icon('x', { size: 14 });
   document.querySelector('.act[data-mode="assist"] .ic').innerHTML = icon('sparkles', { size: 16 });
   document.querySelector('.act[data-mode="say"] .ic').innerHTML = icon('wand-sparkles', { size: 16 });
   document.querySelector('.act[data-mode="followup"] .ic').innerHTML = icon('message-circle', { size: 16 });
@@ -20,6 +19,40 @@
   $('#send-btn').innerHTML = icon('play', { size: 15 });
   const clearIC = document.querySelector('#clear-transcript-btn .ic');
   if (clearIC) clearIC.innerHTML = icon('trash-2', { size: 15 });
+
+  const screenshotPrivacyButton = $('#screenshot-privacy-btn');
+  function renderContentProtection(snapshot) {
+    if (!screenshotPrivacyButton || !snapshot) return;
+    const blocked = snapshot.enabled === true;
+    const unavailable = snapshot.supported === false;
+    screenshotPrivacyButton.textContent = unavailable
+      ? 'Screen-share protection unavailable'
+      : (blocked ? 'Screen-share protection: on (best effort)' : 'Screenshots allowed for support');
+    screenshotPrivacyButton.setAttribute('aria-pressed', String(blocked));
+    screenshotPrivacyButton.setAttribute('aria-label', blocked
+      ? 'Best-effort screen-share protection is on. Activate to allow screenshots for support.'
+      : 'Screenshots are allowed for support. Activate to turn on best-effort screen-share protection.');
+    screenshotPrivacyButton.disabled = unavailable;
+  }
+  async function refreshContentProtection() {
+    try {
+      renderContentProtection(await cue.contentProtectionGet());
+    } catch (_) {
+      renderContentProtection({ enabled: false, supported: false });
+    }
+  }
+  if (screenshotPrivacyButton) {
+    screenshotPrivacyButton.addEventListener('click', async () => {
+      const nextEnabled = screenshotPrivacyButton.getAttribute('aria-pressed') !== 'true';
+      try {
+        renderContentProtection(await cue.contentProtectionSet(nextEnabled));
+      } catch (_) {
+        void refreshContentProtection();
+      }
+    });
+  }
+  cue.on('content-protection:changed', renderContentProtection);
+  $('#quit-btn').addEventListener('click', () => cue.quit());
 
   // ---- state -------------------------------------------------------------
   let settings = null;
@@ -319,49 +352,6 @@
     return false;
   }
 
-  // ---- Auto-fill the input box with transcribed speech from interviewer ----
-  function autoFillInputFromSTT(text) {
-    // If user has manually typed something different, don't overwrite
-    if (!inputFromSTT && input.value.trim().length > 0) return;
-
-    // Cancel any pending soft-clear (interviewer is still talking)
-    clearTimeout(softClearTimer);
-    composer.classList.remove('stt-dimmed');
-
-    const current = input.value.trim();
-    const newText = current ? current + ' ' + text : text;
-    input.value = newText;
-    inputFromSTT = true;
-    lastSTTValue = newText; // FIX #6: Track the STT value for edit detection
-    syncPlaceholder();
-
-    // Show filling state
-    composer.classList.add('stt-filling');
-    updateQuestionReadyState();
-    updateSendButtonState(); // FIX #9: Update send button state
-
-    // Reset the idle timer — after 2s of silence, check if question is complete
-    clearTimeout(questionFinalizeTimer);
-    questionFinalizeTimer = setTimeout(() => {
-      if (isLikelyCompleteQuestion(input.value)) {
-        composer.classList.add('stt-ready');
-        updateSendButtonState(); // FIX #9: Update send button when ready
-        // Subtle notification that question is ready
-        showToast('Press Enter to answer', 2500);
-      }
-    }, 1800);
-
-    // After 8s of no new words, save to history and keep stable
-    clearTimeout(sttFillTimer);
-    sttFillTimer = setTimeout(() => {
-      saveToQuestionHistory(input.value);
-      composer.classList.remove('stt-filling');
-      // Keep stt-ready if applicable
-      updateQuestionReadyState();
-      updateSendButtonState(); // FIX #9
-    }, 8000);
-  }
-
   // ---- Soft clear: don't immediately wipe question when user speaks ----
   function softClearSTTFill() {
     // When the user speaks (You channel), don't immediately clear
@@ -414,7 +404,6 @@
     clearTimeout(softClearTimer);
     clearTimeout(questionFinalizeTimer);
     clearTimeout(sttFillTimer);
-    clearInputInterim(); // FIX #5: Clear interim when clearing input
     syncPlaceholder();
     updateSendButtonState(); // FIX #9
     updateHistoryBadge(); // FIX #14
@@ -445,9 +434,6 @@
   
   input.addEventListener('input', () => {
     const currentValue = input.value;
-    
-    // FIX #5: Clear interim text when user starts typing
-    clearInputInterim();
     
     // FIX #6: Only detach from STT mode if edit is substantial
     // Minor corrections (typo fixes, small additions) should keep STT mode
@@ -481,8 +467,6 @@
   function send() {
     const text = input.value.trim();
     if (!text) { runMode('assist', ''); return; }
-    const wasFromSTT = inputFromSTT;
-    
     // Save to history before clearing (in case user wants to redo)
     saveToQuestionHistory(text);
     
@@ -497,9 +481,8 @@
     syncPlaceholder();
     updateSendButtonState(); // FIX #9
     
-    // If text came from STT (interviewer question), use answerThis mode
-    // Otherwise use ask mode (user typed their own question)
-    runMode(wasFromSTT ? 'answerThis' : 'ask', text);
+    // Text is always typed in the manual composer; speech stays in transcript history.
+    runMode('ask', text);
   }
   $('#send-btn').addEventListener('click', send);
   input.addEventListener('keydown', (e) => {
@@ -1069,25 +1052,6 @@
     }
     return interimEl;
   }
-  // FIX #12: Show interim text in input box (grayed/italic) before final arrives
-  let inputInterimEl = null;
-  function showInterimInInput(text) {
-    if (!inputInterimEl) {
-      inputInterimEl = document.createElement('span');
-      inputInterimEl.className = 'input-interim';
-      // FIX #2: Insert into composer (not input-area) for correct positioning
-      composer.appendChild(inputInterimEl);
-    }
-    inputInterimEl.textContent = text;
-    inputInterimEl.style.display = text ? 'block' : 'none';
-  }
-  function clearInputInterim() {
-    if (inputInterimEl) {
-      inputInterimEl.textContent = '';
-      inputInterimEl.style.display = 'none';
-    }
-  }
-  
   cue.on('stt:interim', ({ channel, text }) => {
     setLiveDotState('transcribing');
     const el = getOrCreateInterimEl();
@@ -1096,17 +1060,12 @@
     el.classList.add('show');
     appendTranscriptHistoryTurn(channel, text, true); // update sidebar interim
     
-    // FIX #12: Show interviewer's interim speech in input area
-    if (channel === 'them' && !input.value.trim()) {
-      showInterimInInput(text);
-    }
   });
   cue.on('stt:final', ({ channel, text }) => {
     setLiveDotState('idle');
     // Clear interim when we get a final
     if (interimEl) { interimEl.textContent = ''; interimEl.classList.remove('show'); }
     clearTranscriptInterim();
-    clearInputInterim(); // FIX #12: Clear interim text from input area
     // sidebar: the final turn is added via the 'transcript' event below
   });
   cue.on('stt:status', ({ channel, status, provider }) => {
@@ -1190,14 +1149,6 @@
   cue.on('transcript', ({ channel, text }) => {
     if (!text || text.trim().length < 2 || /^[?!.,;:\-…]+$/.test(text.trim())) return;
     appendTranscriptHistoryTurn(channel, text, false);
-    // Auto-fill the input box with Them (interviewer) speech
-    if (channel === 'them') {
-      cancelSoftClear(); // Interviewer is speaking, cancel any pending clear
-      autoFillInputFromSTT(text);
-    } else {
-      // User spoke — soft clear (don't immediately wipe, wait to see if they're really answering)
-      softClearSTTFill();
-    }
   });
   let statusTimer = null;
   let persistentCaptureStatus = null;
@@ -2132,6 +2083,7 @@
   // ---- boot --------------------------------------------------------------
   (async function boot() {
     settings = await cue.settingsGet();
+    await refreshContentProtection();
 
     // R4: shortcut hints
     const sayHintEl = document.getElementById('say-shortcut-hint');

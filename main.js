@@ -52,6 +52,36 @@ function getWindowsBuild() {
 }
 const WIN_BUILD = getWindowsBuild();
 const WIN_SUPPORTS_CONTENT_PROTECTION = !isWindows || WIN_BUILD >= 19041;
+// Protection is on unless a developer explicitly starts cue with CUE_NO_PROTECT.
+// On older Windows builds the OS cannot enforce it; the renderer receives that fact.
+let contentProtectionEnabled = !process.env.CUE_NO_PROTECT;
+
+function contentProtectionSnapshot() {
+  let enabled = contentProtectionEnabled && WIN_SUPPORTS_CONTENT_PROTECTION;
+  if (enabled && win && !win.isDestroyed() && typeof win.isContentProtected === 'function') {
+    enabled = win.isContentProtected();
+  }
+  return {
+    enabled,
+    supported: WIN_SUPPORTS_CONTENT_PROTECTION
+  };
+}
+
+function isCueRenderer(event) {
+  return !!(win && !win.isDestroyed() && event && event.sender === win.webContents);
+}
+
+function assertCueRenderer(event) {
+  if (!isCueRenderer(event)) throw new Error('content-protection IPC is only available to the active cue window');
+}
+
+function applyContentProtection(enabled) {
+  contentProtectionEnabled = !!enabled;
+  if (win && !win.isDestroyed() && WIN_SUPPORTS_CONTENT_PROTECTION) {
+    win.setContentProtection(contentProtectionEnabled);
+  }
+  return contentProtectionSnapshot();
+}
 
 let permWin = null;
 
@@ -272,14 +302,12 @@ function createWindow() {
   // Fix 2: Only call setContentProtection if the OS supports it.
   // On Windows, WDA_EXCLUDEFROMCAPTURE requires build 19041+ (Windows 10 May 2020 Update).
   // On older builds we skip it silently to avoid a no-op and send a warning to the renderer.
-  const shouldProtect = !process.env.CUE_NO_PROTECT;
-  if (shouldProtect) {
-    if (WIN_SUPPORTS_CONTENT_PROTECTION) {
-      win.setContentProtection(true);
-    } else {
-      // Will notify the renderer after it loads
-      console.log(`[cue] Windows build ${WIN_BUILD} < 19041 — setContentProtection not supported. Window may appear in screen shares.`);
-    }
+  const shouldProtect = contentProtectionEnabled;
+  if (WIN_SUPPORTS_CONTENT_PROTECTION) {
+    win.setContentProtection(contentProtectionEnabled);
+  } else if (shouldProtect) {
+    // Will notify the renderer after it loads.
+    console.log(`[cue] Windows build ${WIN_BUILD} < 19041 — setContentProtection not supported. Window may appear in screen shares.`);
   }
 
   win.setAlwaysOnTop(true, 'screen-saver', 1);
@@ -304,6 +332,7 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     win.showInactive();
     win.setTitle('Microsoft Edge Update');
+    send('content-protection:changed', contentProtectionSnapshot());
     // Warn about missing content protection on old Windows builds
     if (isWindows && shouldProtect && !WIN_SUPPORTS_CONTENT_PROTECTION) {
       send('status', {
@@ -714,6 +743,17 @@ ipcMain.handle('platform:info', () => ({
   winBuild: WIN_BUILD,
   winSupportsContentProtection: WIN_SUPPORTS_CONTENT_PROTECTION
 }));
+ipcMain.handle('content-protection:get', (event) => {
+  assertCueRenderer(event);
+  return contentProtectionSnapshot();
+});
+ipcMain.handle('content-protection:set', (event, enabled) => {
+  assertCueRenderer(event);
+  if (typeof enabled !== 'boolean') throw new TypeError('content protection must be a boolean');
+  const snapshot = applyContentProtection(enabled);
+  send('content-protection:changed', contentProtectionSnapshot());
+  return snapshot;
+});
 ipcMain.handle('transcript:clear', () => {
   transcript.clear();
   return { ok: true };
