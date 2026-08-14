@@ -11,6 +11,7 @@
     "postinstall": "node scripts/rename-electron.js",
     "prepare:whisper": "node scripts/prepare-whisper-runtime.js",
     "verify:whisper-runtime": "node scripts/verify-whisper-runtime.js",
+    "verify:mac-app": "node scripts/verify-macos-app.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder --mac zip",
     "dist:mac": "electron-builder --mac zip",

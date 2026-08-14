@@ -25,6 +25,10 @@ test('dist/pack scripts do not pass an inline --config that could bypass electro
   }
 });
 
+test('package exposes the macOS application verifier', () => {
+  assert.equal(pkg.scripts['verify:mac-app'], 'node scripts/verify-macos-app.js');
+});
+
 test('mac config never auto-publishes and only claims hardened runtime / notarization with a real cert', () => {
   const original = { ...process.env };
   try {
@@ -72,4 +76,20 @@ test('mac config ships the zip target with entitlements files that exist on disk
   // silently, with no error, which is indistinguishable from a code bug.
   const entitlementsXml = fs.readFileSync(path.join(root, builder.mac.entitlements), 'utf8');
   assert.match(entitlementsXml, /com\.apple\.security\.device\.audio-input/);
+});
+
+test('packaging allowlist includes the renderer and source reliability modules', () => {
+  delete require.cache[require.resolve('../electron-builder.cjs')];
+  const builder = require('../electron-builder.cjs');
+  assert.ok(builder.files.includes('renderer/**/*'));
+  assert.ok(builder.files.includes('src/**/*'));
+  for (const modulePath of [
+    'renderer/capture-coordinator.js',
+    'src/diagnostics.js',
+    'src/provider-errors.js',
+    'src/request-policy.js',
+    'src/transcript-ledger.js',
+  ]) {
+    assert.ok(fs.existsSync(path.join(__dirname, '..', modulePath)), `missing source module ${modulePath}`);
+  }
 });
