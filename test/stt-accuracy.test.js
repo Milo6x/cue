@@ -87,12 +87,14 @@ test('OpenAI realtime ignores deltas and finals received after disconnect', () =
     onTranscript: (text) => finals.push(text)
   });
 
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-a', delta: 'before stop' });
   stt.disconnect();
-  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', delta: 'late' });
-  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'late final' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-a', delta: ' late' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-a', transcript: 'late final' });
 
-  assert.deepEqual(interim, []);
+  assert.deepEqual(interim, ['before stop']);
   assert.deepEqual(finals, []);
+  assert.equal(stt._transcriptionDeltas.size, 0);
 });
 
 test('OpenAI realtime holds buffered audio until its transcription configuration is accepted', () => {
@@ -128,15 +130,18 @@ test('OpenAI realtime emits completed turns in committed chronology when complet
 });
 
 test('OpenAI realtime transcription failure unblocks later turns and ignores the failed item late final', () => {
+  const interim = [];
   const finals = [];
   const errors = [];
   const stt = new OpenAIRealtimeSTT('k', {
+    onInterim: (text) => interim.push(text),
     onTranscript: (text) => finals.push(text),
     onError: (error) => errors.push(error)
   });
 
   stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-a', previous_item_id: 'root' });
   stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-b', previous_item_id: 'item-a' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-a', delta: 'stale partial' });
   stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-b', transcript: 'second' });
   stt._handleEvent({
     type: 'conversation.item.input_audio_transcription.failed',
@@ -148,7 +153,10 @@ test('OpenAI realtime transcription failure unblocks later turns and ignores the
   assert.deepEqual(errors, [{ provider: 'openai-realtime', message: 'could not transcribe', status: 'transcription_failed' }]);
 
   stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-a', transcript: 'late first' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-a', delta: ' late partial' });
+  assert.deepEqual(interim, ['stale partial']);
   assert.deepEqual(finals, ['second']);
+  assert.equal(stt._transcriptionDeltas.size, 0);
 });
 
 test('OpenAI realtime bounds a turn whose predecessor ID never arrives and falls back for finals without IDs', async () => {
@@ -167,4 +175,59 @@ test('OpenAI realtime bounds a turn whose predecessor ID never arrives and falls
 
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(finals, ['fallback without id', 'tracked second']);
+});
+
+test('OpenAI realtime accumulates item deltas when the completion contains only the last fragment', () => {
+  const interim = [];
+  const finals = [];
+  const stt = new OpenAIRealtimeSTT('k', {
+    onInterim: (text) => interim.push(text),
+    onTranscript: (text) => finals.push(text)
+  });
+
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-a', previous_item_id: 'root' });
+  ['This is ', 'a sustained ', 'pipeline'].forEach((delta) => {
+    stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-a', delta });
+  });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-a', transcript: 'pipeline' });
+
+  assert.deepEqual(interim, ['This is ', 'This is a sustained ', 'This is a sustained pipeline']);
+  assert.deepEqual(finals, ['This is a sustained pipeline']);
+  assert.equal(stt._transcriptionDeltas.size, 0);
+});
+
+test('OpenAI realtime prefers a complete provider transcript over a partial delta assembly', () => {
+  const finals = [];
+  const stt = new OpenAIRealtimeSTT('k', { onTranscript: (text) => finals.push(text) });
+
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-a', previous_item_id: 'root' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-a', delta: 'This is a sustained pipe' });
+  stt._handleEvent({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'item-a',
+    transcript: 'This is a sustained pipeline.'
+  });
+
+  assert.deepEqual(finals, ['This is a sustained pipeline.']);
+});
+
+test('OpenAI realtime keeps interleaved item delta assemblies isolated and orders their reconciled finals', () => {
+  const interim = [];
+  const finals = [];
+  const stt = new OpenAIRealtimeSTT('k', {
+    onInterim: (text) => interim.push(text),
+    onTranscript: (text) => finals.push(text)
+  });
+
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-a', previous_item_id: 'root' });
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-b', previous_item_id: 'item-a' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-a', delta: 'Alpha ' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-b', delta: 'Bravo ' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-a', delta: 'done' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item-b', delta: 'done' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-b', transcript: 'done' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-a', transcript: 'done' });
+
+  assert.deepEqual(interim, ['Alpha ', 'Bravo ', 'Alpha done', 'Bravo done']);
+  assert.deepEqual(finals, ['Alpha done', 'Bravo done']);
 });

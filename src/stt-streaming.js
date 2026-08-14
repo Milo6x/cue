@@ -60,6 +60,37 @@ function isNuisanceOpenAIRealtimeFinal(transcript, languages) {
   return languages.length === 1 && languages[0] === 'en' && /^[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]$/u.test(text);
 }
 
+function normalizeTranscriptForComparison(text) {
+  return String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, '')
+    .trim();
+}
+
+function reconcileOpenAIRealtimeTranscript(providerTranscript, accumulatedDeltas) {
+  const provider = String(providerTranscript || '').trim();
+  const accumulated = String(accumulatedDeltas || '').trim();
+  if (!accumulated) return provider;
+  if (!provider) return accumulated;
+
+  const providerComparable = normalizeTranscriptForComparison(provider);
+  const accumulatedComparable = normalizeTranscriptForComparison(accumulated);
+  if (providerComparable === accumulatedComparable) return provider;
+
+  const providerWords = providerComparable.split(/\s+/).filter(Boolean).length;
+  const accumulatedWords = accumulatedComparable.split(/\s+/).filter(Boolean).length;
+  const providerIsShorterFragment = providerComparable.length < accumulatedComparable.length &&
+    (accumulatedComparable.endsWith(providerComparable) ||
+      (providerWords < accumulatedWords && accumulatedComparable.includes(providerComparable)));
+  if (providerIsShorterFragment) return accumulated;
+
+  return providerWords >= accumulatedWords || providerComparable.length >= accumulatedComparable.length
+    ? provider
+    : accumulated;
+}
+
 // ============================================================================
 // OpenAI Realtime Transcription Session (WebSocket)
 // Uses the dedicated transcription session type for lowest latency streaming STT
@@ -88,11 +119,14 @@ class OpenAIRealtimeSTT {
     this._transcriptionItems = new Map();
     this._transcriptionOrder = [];
     this._transcriptionResults = new Map();
+    this._transcriptionDeltas = new Map();
     this._transcriptionSequence = 0;
     this._handledTranscriptionIds = new Set();
     this._handledTranscriptionOrder = [];
     this._maxTrackedTranscriptions = 64;
     this._maxHandledTranscriptions = 128;
+    this._maxDeltaItems = 64;
+    this._maxDeltaCharsPerItem = 12000;
     this._reorderTimeoutMs = Number.isFinite(options.reorderTimeoutMs) && options.reorderTimeoutMs > 0
       ? options.reorderTimeoutMs
       : 15000;
@@ -175,9 +209,7 @@ class OpenAIRealtimeSTT {
         break;
 
       case 'conversation.item.input_audio_transcription.delta':
-        if (event.delta) {
-          this.onInterim(event.delta);
-        }
+        this._appendTranscriptionDelta(event.item_id, event.delta);
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
@@ -204,6 +236,7 @@ class OpenAIRealtimeSTT {
 
       case 'error':
         this._sessionReady = false;
+        this._transcriptionDeltas.clear();
         this.onError({
           provider: 'openai-realtime',
           message: event.error?.message || 'Unknown realtime error',
@@ -217,6 +250,26 @@ class OpenAIRealtimeSTT {
     if (typeof value !== 'string') return null;
     const id = value.trim();
     return id && id.length <= 512 ? id : null;
+  }
+
+  _appendTranscriptionDelta(rawItemId, rawDelta) {
+    const delta = typeof rawDelta === 'string' ? rawDelta : '';
+    if (!delta) return;
+    const itemId = this._normalizeTranscriptionItemId(rawItemId);
+    if (itemId && this._handledTranscriptionIds.has(itemId)) return;
+
+    if (!itemId) {
+      this.onInterim(delta);
+      return;
+    }
+
+    if (!this._transcriptionDeltas.has(itemId) && this._transcriptionDeltas.size >= this._maxDeltaItems) {
+      this._transcriptionDeltas.delete(this._transcriptionDeltas.keys().next().value);
+    }
+    const accumulated = ((this._transcriptionDeltas.get(itemId) || '') + delta)
+      .slice(0, this._maxDeltaCharsPerItem);
+    this._transcriptionDeltas.set(itemId, accumulated);
+    this.onInterim(accumulated);
   }
 
   _trackTranscriptionItem(rawItemId, rawPreviousItemId) {
@@ -278,8 +331,10 @@ class OpenAIRealtimeSTT {
 
   _completeTranscription(rawItemId, transcript) {
     const itemId = this._normalizeTranscriptionItemId(rawItemId);
+    const accumulated = itemId ? this._transcriptionDeltas.get(itemId) : '';
+    if (itemId) this._transcriptionDeltas.delete(itemId);
     if (itemId && this._handledTranscriptionIds.has(itemId)) return;
-    const text = String(transcript || '').trim();
+    const text = reconcileOpenAIRealtimeTranscript(transcript, accumulated);
     const result = { text: isNuisanceOpenAIRealtimeFinal(text, this.languages) ? null : text };
 
     // The committed event normally precedes completion on the same WebSocket. If
@@ -296,6 +351,7 @@ class OpenAIRealtimeSTT {
 
   _failTranscription(rawItemId, error) {
     const itemId = this._normalizeTranscriptionItemId(rawItemId);
+    if (itemId) this._transcriptionDeltas.delete(itemId);
     if (itemId && !this._handledTranscriptionIds.has(itemId)) {
       if (this._transcriptionItems.has(itemId)) {
         this._transcriptionResults.set(itemId, { text: null });
@@ -356,12 +412,14 @@ class OpenAIRealtimeSTT {
     if (!itemId) return;
     this._transcriptionItems.delete(itemId);
     this._transcriptionResults.delete(itemId);
+    this._transcriptionDeltas.delete(itemId);
     this._rememberHandledTranscription(itemId);
     this._rebuildTranscriptionOrder();
   }
 
   _rememberHandledTranscription(itemId) {
     if (!itemId || this._handledTranscriptionIds.has(itemId)) return;
+    this._transcriptionDeltas.delete(itemId);
     this._handledTranscriptionIds.add(itemId);
     this._handledTranscriptionOrder.push(itemId);
     while (this._handledTranscriptionOrder.length > this._maxHandledTranscriptions) {
@@ -380,6 +438,7 @@ class OpenAIRealtimeSTT {
     this._transcriptionItems.clear();
     this._transcriptionOrder = [];
     this._transcriptionResults.clear();
+    this._transcriptionDeltas.clear();
     this._transcriptionSequence = 0;
     this._handledTranscriptionIds.clear();
     this._handledTranscriptionOrder = [];
