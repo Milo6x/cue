@@ -634,11 +634,14 @@
       category: error.category || 'capture',
       message: error.message
     });
-    if (captureCoordinator) {
-      void captureCoordinator.channelFailed(channel, error).catch((failure) => {
-        showStatus(captureErrorMessage(failure, 'Listening could not be updated. Please try again.'), { persistent: true });
-      });
+    if (!captureCoordinator) {
+      showStatus('Listening could not be updated. Please try again.', { persistent: true });
+      return Promise.resolve();
     }
+    return captureCoordinator.channelFailed(channel, error).catch(() => {
+      cue.log('[capture] coordinator could not update capture state');
+      showStatus('Listening could not be updated. Please try again.', { persistent: true });
+    });
   }
 
   function captureErrorMessage(error, fallback) {
@@ -695,8 +698,7 @@
       }
       micTrackEnded = () => {
         const error = captureError('device', 'Your microphone connection ended. Check your default microphone and try again.');
-        captureFailure('microphone', error);
-        void stopMic();
+        void captureFailure('microphone', error);
       };
       if (micTrack.addEventListener) micTrack.addEventListener('ended', micTrackEnded, { once: true });
       else micTrack.onended = micTrackEnded;
@@ -785,8 +787,7 @@
       }
       sysTrackEnded = () => {
         const error = captureError('device', 'Your meeting-audio connection ended. Start listening again to reconnect it.');
-        captureFailure('system', error);
-        void stopSystemAudio();
+        void captureFailure('system', error);
       };
       if (sysTrack.addEventListener) sysTrack.addEventListener('ended', sysTrackEnded, { once: true });
       else sysTrack.onended = sysTrackEnded;

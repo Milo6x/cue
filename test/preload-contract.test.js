@@ -30,6 +30,8 @@ test('renderer routes capture lifecycle through the coordinator, not toggle side
   const renderer = read('renderer/renderer.js');
   const buttonHandler = section(renderer, "$('#stop-btn').addEventListener('click'", '// Transcript toggle removed');
   const captureStateHandler = section(renderer, "cue.on('capture:state'", '// ---- real-time transcript display');
+  const micEndedHandler = section(renderer, 'micTrackEnded = () => {', "if (micTrack.addEventListener)");
+  const systemEndedHandler = section(renderer, 'sysTrackEnded = () => {', "if (sysTrack.addEventListener)");
 
   assert.match(renderer, /new CueCapture\.CaptureCoordinator\(/);
   assert.match(renderer, /setPipelineActive:\s*\(active\)\s*=>\s*cue\.captureSet\(active\)/);
@@ -37,6 +39,10 @@ test('renderer routes capture lifecycle through the coordinator, not toggle side
   assert.match(buttonHandler, /captureCoordinator\.(start|stop)\(\)/);
   assert.doesNotMatch(buttonHandler, /cue\.captureToggle|startSystemAudio\(|startMic\(|stopMic\(|stopSystemAudio\(/);
   assert.doesNotMatch(captureStateHandler, /startMic\(|startSystemAudio\(|stopMic\(|stopSystemAudio\(/);
+  assert.match(micEndedHandler, /captureFailure\('microphone', error\)/);
+  assert.doesNotMatch(micEndedHandler, /stopMic\(/);
+  assert.match(systemEndedHandler, /captureFailure\('system', error\)/);
+  assert.doesNotMatch(systemEndedHandler, /stopSystemAudio\(/);
   assert.match(renderer, /cue\.on\('capture:remote-stop', async \(\{ id \}\) => \{[\s\S]{0,500}await captureCoordinator\.stop\(\)[\s\S]{0,500}await cue\.captureSet\(false\)[\s\S]{0,500}cue\.captureRemoteStopAck\(id, \{ stopped: true \}\)/);
   assert.match(read('renderer/index.html'), /<script src="capture-status-tracker\.js"><\/script>\s*<script src="renderer\.js"><\/script>/);
 });
