@@ -42,10 +42,10 @@ Phase 1 is deliberately a **user-started listening and manual-answer** flow. Cli
 | Your microphone (**You**) | ✅ | ✅ |
 | Meeting/system audio (**Meeting**) | ✅ ScreenCaptureKit loopback | ✅ loopback capture |
 | Channel failures | ✅ microphone and Meeting fail independently | ✅ microphone and Meeting fail independently |
-| Hidden from screen shares | ⚠️ best-effort; weaker on macOS 15.4+ | ✅ `WDA_EXCLUDEFROMCAPTURE` |
+| Hidden from screen shares | ⚠️ best-effort; weaker on macOS 15.4+ | ⚠️ best-effort capture exclusion; not every capture path |
 | Permissions to grant | Microphone; Screen & System Audio Recording | Microphone |
 
-On macOS 14.4 and later, cue captures your microphone as **You** and meeting/system output as **Meeting** through ScreenCaptureKit loopback. A failure in one channel does not stop the other channel from listening. On older macOS, Meeting audio is unavailable; use macOS 14.4+ for the supported macOS listening flow.
+On macOS 14.4 and later, cue captures your microphone as **You** and meeting/system output as **Meeting** through ScreenCaptureKit loopback. A failure in one channel does not stop the other channel from listening. On older macOS, Meeting audio is unavailable; use macOS 14.4+ for the supported macOS listening flow. On both platforms, capture exclusion is best-effort rather than a guarantee; verify before sharing sensitive content because it does not cover every capture path.
 
 ## Install and run
 
@@ -123,22 +123,24 @@ When prompted, allow cue. If a prompt does not appear, use these exact paths:
 
 Quit and reopen cue if macOS asks. After an ad-hoc rebuild, turn cue off and back on in both locations, then reopen the rebuilt app.
 
+### 2. Grant Windows microphone permission
+
 On Windows, open **Settings → Privacy & security → Microphone** and enable both **Microphone access** and **Let desktop apps access your microphone**. Windows meeting audio uses loopback; no macOS-style Screen & System Audio Recording grant is needed.
 
-### 2. Configure providers
+### 3. Configure providers
 
-Chat/AI and speech-to-text are separate settings. Open **Settings** from the `...` button, configure an AI provider for answers, then choose a speech-to-text provider in **Settings → Transcription** for listening.
+Chat/AI and speech-to-text are separate settings. Open **Settings** from the `...` button, configure an AI provider for answers, then choose a speech-to-text provider in **Settings → Audio** for listening.
 
 | Need | Supported configuration |
 |---|---|
 | AI answers | OpenAI, Anthropic, Gemini, Custom OpenAI-compatible endpoint, Ollama, Groq, MiniMax, or Azure AI |
 | Local speech-to-text | Select **Local**, choose/download or import a whisper.cpp model; no cloud audio fallback is used |
 | Cloud speech-to-text | Select **Deepgram**, **OpenAI**, or **Gemini** and provide that provider’s key |
-| Automatic speech-to-text choice | Select **Auto**; it prefers Deepgram streaming, then OpenAI Realtime, then available batch providers |
+| Automatic speech-to-text choice | Select **Auto**; it prioritizes Deepgram streaming, then OpenAI Realtime. With neither streaming credential, it enters batch mode; Gemini is the batch fallback surfaced by the streaming selector when a Gemini key is configured. |
 
-Deepgram and OpenAI are streaming choices when their selected/available credentials permit it. Gemini is batch transcription. Local mode loads one selected whisper.cpp model for both You and Meeting, keeps audio on the computer, and reports local errors instead of silently sending audio to a cloud provider. An Anthropic, Custom, Ollama, MiniMax, or Azure AI chat configuration does not itself provide speech-to-text; configure one of the transcription choices separately.
+Deepgram and OpenAI are streaming choices when their selected/available credentials permit it. Gemini is batch transcription. In batch mode, the current Auto chain tries configured OpenAI, Groq, then Gemini credentials in that order, including after a streaming error. Local mode loads one selected whisper.cpp model for both You and Meeting, keeps audio on the computer, and reports local errors instead of silently sending audio to a cloud provider. An Anthropic, Custom, Ollama, MiniMax, or Azure AI chat configuration does not itself provide speech-to-text; configure one of the transcription choices separately.
 
-### 3. Start listening, then ask manually
+### 4. Start listening, then ask manually
 
 1. Click the Start/stop listening button in the top bar.
 2. Check the live indicator or **Settings → Health**. Listening can be ready with only You or only Meeting when the other channel failed.
@@ -148,7 +150,7 @@ Deepgram and OpenAI are streaming choices when their selected/available credenti
 
 ## Health and recovery
 
-Open **Settings → Health** for microphone permission, microphone capture, Screen & System Audio permission, Meeting audio, speech-to-text, AI-provider readiness, a categorized last failure, and a copyable safe summary.
+Open **Settings → Health** for microphone permission, microphone capture, Screen & System Audio permission, Meeting audio, speech-to-text, AI-provider configuration, a categorized last failure, and a copyable safe summary. Health checks configuration presence only: it does not check credential validity, network reachability, or provider availability. An actual request reports authentication, quota, model, and network failures.
 
 Capture has fixed states **off**, **starting**, **ready**, and **failed**. During shutdown, the listening session and speech-to-text can show **stopping**; streaming speech-to-text can also show **disconnected** while it reconnects or reports failure. A ready microphone with failed Meeting audio (or the reverse) is a partial, usable listening session rather than a reason to stop both channels.
 
@@ -161,7 +163,7 @@ Capture has fixed states **off**, **starting**, **ready**, and **failed**. Durin
 | Provider quota | Wait or check billing, then choose another configured provider if appropriate. |
 | Model unavailable | Select a current model in Settings and retry. |
 | Network, service, or timeout | Check the connection, then retry; temporary provider failures can recover without changing capture permissions. |
-| Local model/runtime problem | In **Settings → Transcription**, download or import a verified model. For source runs, prepare the runtime with `npm run prepare:whisper`. |
+| Local model/runtime problem | In **Settings → Audio**, download or import a verified model. For source runs, prepare the runtime with `npm run prepare:whisper`. |
 
 The **Copy diagnostic summary** control is intentionally safe to share for support: it excludes API keys, transcript content, captured audio, and screenshots.
 
