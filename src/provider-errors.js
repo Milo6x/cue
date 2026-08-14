@@ -19,11 +19,10 @@ function redactSecrets(value) {
   return String(value || '')
     .replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted API key]')
     .replace(/\bAIza[A-Za-z0-9_-]+/g, '[redacted API key]')
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted token]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
-    .replace(/((?:api[-_]key)\s*[=:]\s*["']?)[^\s,"'}\]]+/gi, '$1[redacted]')
-    .replace(/((?:"api[-_]key"\s*:\s*")[^"]+("))/gi, '$1[redacted]$2')
-    .replace(/((?:authorization)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted token]');
+    .replace(/(["'](?:authorization|api[-_]key)["']\s*:\s*["'])[^"']*(["'])/gi, '$1[redacted]$2')
+    .replace(/((?:api[-_]key|authorization)\s*[=:]\s*["']?)[^\s,"'}\]]+/gi, '$1[redacted]');
 }
 
 function errorDetails(error) {
@@ -64,44 +63,55 @@ function formatRetryWait(seconds) {
 
 function classifyProviderError(error, context = {}) {
   if (error instanceof ProviderRequestError) {
-    return { category: error.category, retryable: error.retryable, status: error.status };
+    return {
+      category: error.category,
+      retryable: error.retryable,
+      provider: error.provider,
+      model: error.model,
+      status: error.status,
+      message: error.message
+    };
   }
 
   const { status, code, text, rawMessage } = errorDetails(error);
   const normalizedCode = String(code || '').toLowerCase();
   const normalizedText = text.toLowerCase();
   const explicitCategory = error && error.category;
+  const provider = context.provider || null;
+  const model = context.model || null;
+  let category = 'unknown';
+  let retryable = false;
+  let classifiedStatus = status;
 
   if (explicitCategory === 'configuration' || context.ready === false || context.configurationError) {
-    return { category: 'configuration', retryable: false, status, rawMessage };
-  }
-  if (status === 401 || /\b401\b|invalid (?:api )?key|invalid[_ -]?api[_ -]?key|unauthori[sz]ed|authentication (?:failed|required)/i.test(text)) {
-    return { category: 'authentication', retryable: false, status, rawMessage };
-  }
-  if (status === 403 || /\b403\b|forbidden|permission(?:s)? (?:denied|required)|not permitted/i.test(text)) {
-    return { category: 'permission', retryable: false, status, rawMessage };
-  }
-  if (status === 429 || normalizedCode === '429' || normalizedCode === 'insufficient_quota' || normalizedCode === 'rate_limit_exceeded' ||
+    category = 'configuration';
+  } else if (status === 401 || /\b401\b|invalid (?:api )?key|invalid[_ -]?api[_ -]?key|unauthori[sz]ed|authentication (?:failed|required)/i.test(text)) {
+    category = 'authentication';
+  } else if (status === 403 || /\b403\b|forbidden|permission(?:s)? (?:denied|required)|not permitted/i.test(text)) {
+    category = 'permission';
+  } else if (status === 429 || normalizedCode === '429' || normalizedCode === 'insufficient_quota' || normalizedCode === 'rate_limit_exceeded' ||
     normalizedCode === 'resource_exhausted' || /\b429\b|insufficient_quota|rate_limit_exceeded|resource_exhausted|quota|rate[ -]?limit|too many requests|exceeded your current quota/i.test(text)) {
-    return { category: 'quota', retryable: false, status: status || 429, rawMessage };
+    category = 'quota';
+    classifiedStatus = status || 429;
+  } else if (status === 404 || normalizedCode === '404' || /\b404\b|model not found|model.*(?:retired|unavailable)|is not found for api version/i.test(text)) {
+    category = 'model';
+    classifiedStatus = status || 404;
+  } else if (status === 408 || (status !== null && status >= 500 && status <= 599)) {
+    category = 'service';
+    retryable = true;
+  } else if (explicitCategory === 'timeout' || /\btimeout\b|timed out|abort(?:ed)?(?:error)?|abort_err/i.test(text)) {
+    category = 'timeout';
+    retryable = true;
+  } else if (/econnreset|econnrefused|enetunreach|eai_again|etimedout|fetch failed|socket hang up|connection reset|\bnetwork(?:\s+connection)?\s+(?:error|failed)\b/i.test(`${normalizedCode} ${normalizedText}`)) {
+    category = 'network';
+    retryable = true;
   }
-  if (status === 404 || normalizedCode === '404' || /\b404\b|model not found|model.*(?:retired|unavailable)|is not found for api version/i.test(text)) {
-    return { category: 'model', retryable: false, status: status || 404, rawMessage };
-  }
-  if (status === 408 || (status !== null && status >= 500 && status <= 599)) {
-    return { category: 'service', retryable: true, status, rawMessage };
-  }
-  if (explicitCategory === 'timeout' || /\btimeout\b|timed out|abort(?:ed)?(?:error)?|abort_err/i.test(text)) {
-    return { category: 'timeout', retryable: true, status, rawMessage };
-  }
-  if (/econnreset|econnrefused|enetunreach|eai_again|etimedout|fetch failed|socket hang up|connection reset/i.test(`${normalizedCode} ${normalizedText}`)) {
-    return { category: 'network', retryable: true, status, rawMessage };
-  }
-  return { category: 'unknown', retryable: false, status, rawMessage };
+
+  const classification = { category, retryable, provider, model, status: classifiedStatus };
+  return { ...classification, message: formatClassifiedMessage(classification, rawMessage) };
 }
 
-function formatProviderErrorMessage(error, provider, model) {
-  const { category, status, rawMessage } = classifyProviderError(error, { provider, model });
+function formatClassifiedMessage({ category, status, provider, model }, rawMessage) {
   const label = providerLabel(provider);
 
   if (category === 'configuration') return redactSecrets(rawMessage || `Complete the ${label} provider settings.`);
@@ -122,17 +132,30 @@ function formatProviderErrorMessage(error, provider, model) {
   return redactSecrets(rawMessage || 'Unknown LLM error.');
 }
 
+function formatProviderErrorMessage(error, provider, model) {
+  return classifyProviderError(error, { provider, model }).message;
+}
+
+function sanitizedCause(error) {
+  const { status, code, rawMessage } = errorDetails(error);
+  const cause = new Error(redactSecrets(rawMessage || 'Provider request failed.'));
+  cause.name = redactSecrets((error && error.name) || 'Error');
+  if (status !== null) cause.status = status;
+  if (code !== null && code !== undefined) cause.code = redactSecrets(code);
+  return cause;
+}
+
 class ProviderRequestError extends Error {
   constructor(error, context = {}) {
     const classification = classifyProviderError(error, context);
-    super(redactSecrets(formatProviderErrorMessage(error, context.provider, context.model)));
+    super(classification.message);
     this.name = 'ProviderRequestError';
     this.category = classification.category;
     this.retryable = classification.retryable;
-    this.provider = context.provider || null;
-    this.model = context.model || null;
+    this.provider = classification.provider;
+    this.model = classification.model;
     this.status = classification.status ?? null;
-    this.cause = error;
+    this.cause = sanitizedCause(error);
   }
 
   static from(error, context = {}) {
