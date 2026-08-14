@@ -2078,7 +2078,7 @@
     {
       icon: '👋',
       title: 'Welcome to cue',
-      body: 'cue is a private AI copilot that floats over your screen. It can <strong>see your screen</strong>, <strong>hear your meetings</strong>, and help you answer questions or solve coding problems — while staying hidden from most screen shares.<br><br>This quick guide gets you running in about a minute.'
+      body: 'cue is a private AI copilot that floats over your screen. It can <strong>see your screen</strong>, <strong>hear your meetings</strong>, and help you answer questions or solve coding problems. Capture exclusion is best-effort; verify before sharing sensitive content.<br><br>This quick guide gets you running in about a minute.'
     },
     {
       icon: '🔐',
@@ -2094,8 +2094,8 @@
     },
     {
       icon: '🫥',
-      title: 'Stay hidden in Zoom',
-      body: 'cue is hidden from most screen shares automatically (Google Meet, Teams, QuickTime — nothing to do). <strong>Zoom needs one setting:</strong><br><br>Zoom → <span class="hl">Settings</span> → <span class="hl">Share Screen</span> → <span class="hl">Advanced</span> → <strong>Screen capture mode</strong> → choose <strong>“Advanced capture with window filtering.”</strong><br><br>Avoid “<strong>without</strong> window filtering” — that mode reveals cue.'
+      title: 'Screen-share privacy',
+      body: 'cue excludes itself from ordinary macOS screen capture where supported, but hiding is not guaranteed across apps and capture methods. Verify before sharing sensitive content.'
     },
     {
       icon: '✨',
