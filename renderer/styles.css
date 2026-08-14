@@ -551,6 +551,33 @@ button:focus { outline: none; }
 .s-caller-empty { color: var(--tx-mut); font-size: 11px; }
 .s-status { color: var(--tx-mut); font-size: 11.5px; margin-top: 6px; min-height: 16px; line-height: 1.4; }
 
+/* Capture diagnostics */
+.diagnostics-note, .diagnostics-message {
+  color: var(--tx-mut); font-size: 11.5px; line-height: 1.45;
+  padding: 9px 10px; border-radius: var(--r-8);
+  border: 1px solid rgba(255,255,255,0.09); background: rgba(255,255,255,0.03);
+}
+.diagnostics-list { display: flex; flex-direction: column; gap: 5px; }
+.diagnostics-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 31px; padding: 6px 9px; border-radius: var(--r-8);
+  background: rgba(0,0,0,0.16); border: 1px solid rgba(255,255,255,0.07);
+  color: var(--tx-2); font-size: 12px;
+}
+.diagnostics-state {
+  max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 3px 7px; border-radius: var(--r-pill); border: 1px solid rgba(255,255,255,0.12);
+  color: var(--tx-mut); font-size: 10.5px; font-variant-numeric: tabular-nums;
+}
+.diagnostics-state.ok { color: #86efac; border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
+.diagnostics-state.warn { color: #fcd34d; border-color: rgba(245,181,71,0.35); background: rgba(245,181,71,0.08); }
+.diagnostics-state.error { color: #fca5a5; border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
+.diagnostics-recovery { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+.diagnostics-recovery .s-label { margin-top: 0; }
+.diagnostics-copy { align-self: flex-start; margin-top: 2px; }
+#diagnostics-copy-status.ok { color: #86efac; }
+#diagnostics-copy-status.error { color: #fca5a5; }
+
 /* AI rules textarea + counter + hint block */
 #ai-rules { min-height: 180px; line-height: 1.5; }
 .s-counter { display: flex; justify-content: flex-end; font-size: 11px; color: var(--tx-mut); margin-top: -4px; }

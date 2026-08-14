@@ -71,3 +71,29 @@ test('renderer releases a failed worklet before using the legacy fallback', () =
   assert.match(renderer, /catch \(workletError\) \{\s*if \(workletError && workletError\.category\) throw workletError;\s*disconnectWorklet\(micWorklet\);\s*micWorklet = null;/);
   assert.match(renderer, /catch \(workletError\) \{\s*if \(workletError && workletError\.category\) throw workletError;\s*disconnectWorklet\(sysWorklet\);\s*sysWorklet = null;/);
 });
+
+test('renderer exposes a compact, live diagnostics pane that copies only the supplied safe summary', () => {
+  const html = read('renderer/index.html');
+  const renderer = read('renderer/renderer.js');
+  const styles = read('renderer/styles.css');
+
+  assert.match(html, /<button class="s-tab" data-tab="health">Health<\/button>/);
+  assert.match(html, /data-pane="health"/);
+  assert.match(html, /id="diagnostics-mic-permission"/);
+  assert.match(html, /id="diagnostics-mic-capture"/);
+  assert.match(html, /id="diagnostics-screen-permission"/);
+  assert.match(html, /id="diagnostics-system-capture"/);
+  assert.match(html, /id="diagnostics-stt-provider"/);
+  assert.match(html, /id="diagnostics-ai-provider"/);
+  assert.match(html, /id="diagnostics-last-failure"/);
+  assert.match(html, /id="diagnostics-copy"/);
+  assert.match(html, /keys, transcripts, audio, and screenshots are never included/i);
+
+  assert.match(renderer, /cue\.diagnosticsGet\(\)/);
+  assert.equal((renderer.match(/cue\.on\('diagnostics:changed'/g) || []).length, 1, 'subscribe only once');
+  assert.match(renderer, /navigator\.clipboard\.writeText\(diagnosticsSummary\)/);
+  assert.doesNotMatch(renderer, /navigator\.clipboard\.writeText\([^)]*innerHTML/);
+  assert.match(renderer, /DIAGNOSTICS_STATE_CLASSES/);
+  assert.match(renderer, /aria-live/);
+  assert.match(styles, /\.diagnostics-row/);
+});

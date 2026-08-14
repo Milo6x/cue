@@ -111,6 +111,7 @@
         <button class="s-tab" data-tab="prep">🎯 Interview Prep</button>
         <button class="s-tab" data-tab="style">✨ Style</button>
         <button class="s-tab" data-tab="qa">💬 Q&amp;A</button>
+        <button class="s-tab" data-tab="health">Health</button>
       </div>
 
       <!-- Tab: Keys -->
@@ -263,6 +264,25 @@
         <div class="s-hint-block">
           These rules tell cue <strong>how</strong> to write, not <strong>what</strong> to say. Use one imperative sentence per line (e.g. <em>Never use em-dashes.</em>). They apply to every mode except coding-problem solves (LeetCode), which stays strict. Stored locally; never sent anywhere except the AI provider when cue answers a question.
         </div>
+      </div>
+
+      <!-- Tab: Health -->
+      <div class="s-body s-tab-pane hidden" data-pane="health">
+        <div class="diagnostics-note">Privacy: keys, transcripts, audio, and screenshots are never included in diagnostics.</div>
+        <div class="diagnostics-list" aria-label="Capture diagnostics">
+          <div class="diagnostics-row"><span>Microphone permission</span><span id="diagnostics-mic-permission" class="diagnostics-state neutral">Checking…</span></div>
+          <div class="diagnostics-row"><span>Microphone capture</span><span id="diagnostics-mic-capture" class="diagnostics-state neutral">Checking…</span></div>
+          <div class="diagnostics-row"><span>Screen &amp; system permission</span><span id="diagnostics-screen-permission" class="diagnostics-state neutral">Checking…</span></div>
+          <div class="diagnostics-row"><span>Meeting audio</span><span id="diagnostics-system-capture" class="diagnostics-state neutral">Checking…</span></div>
+          <div class="diagnostics-row"><span>STT provider</span><span id="diagnostics-stt-provider" class="diagnostics-state neutral">Checking…</span></div>
+          <div class="diagnostics-row"><span>AI provider</span><span id="diagnostics-ai-provider" class="diagnostics-state neutral">Checking…</span></div>
+        </div>
+        <div class="diagnostics-recovery">
+          <div class="s-label">Last failure &amp; recovery</div>
+          <div id="diagnostics-last-failure" class="diagnostics-message" role="status" aria-live="polite">Loading diagnostics…</div>
+        </div>
+        <button id="diagnostics-copy" class="s-action diagnostics-copy" type="button" disabled>Copy diagnostic summary</button>
+        <div id="diagnostics-copy-status" class="s-status" role="status" aria-live="polite"></div>
       </div>
 
 

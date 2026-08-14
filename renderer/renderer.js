@@ -1322,19 +1322,163 @@
 
   // ---- settings ----------------------------------------------------------
   const scrim = $('#settings-scrim');
-  function openSettings() { fillSettings(); scrim.classList.remove('hidden'); }
-  async function closeSettings() {
-    if (await saveSettings()) scrim.classList.add('hidden');
+  const DIAGNOSTICS_STATE_CLASSES = new Set(['neutral', 'ok', 'warn', 'error']);
+  let diagnosticsSummary = '';
+  let diagnosticsFetchVersion = 0;
+  let diagnosticsCopyTimer = null;
+
+  function diagnosticOwn(value, key) {
+    if (!value || typeof value !== 'object') return undefined;
+    try {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) return undefined;
+      return value[key];
+    } catch (_) {
+      return undefined;
+    }
   }
+
+  function diagnosticText(value, fallback) {
+    if (typeof value === 'string') return value.length <= 180 ? value : value.slice(0, 177) + '…';
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return fallback;
+  }
+
+  function diagnosticLabel(value, fallback) {
+    const text = diagnosticText(value, fallback);
+    return text.replace(/-/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+
+  function diagnosticStateClass(kind, value) {
+    const states = {
+      permission: { ok: ['granted'], warn: ['not-determined', 'unknown'], error: ['denied', 'restricted'] },
+      capture: { ok: ['ready'], warn: ['starting'], error: ['failed'] },
+      stt: { ok: ['ready', 'connected', 'transcribing'], warn: ['starting', 'stopping'], error: ['disconnected', 'error', 'unavailable'] },
+      chat: { ok: [true], error: [false] }
+    };
+    const allowed = states[kind] || {};
+    for (const state of ['ok', 'warn', 'error']) {
+      if ((allowed[state] || []).includes(value)) return state;
+    }
+    return 'neutral';
+  }
+
+  function setDiagnosticState(id, text, state) {
+    const target = $('#' + id);
+    if (!target) return;
+    target.textContent = text;
+    target.className = 'diagnostics-state ' + (DIAGNOSTICS_STATE_CLASSES.has(state) ? state : 'neutral');
+  }
+
+  function setDiagnosticsCopyStatus(text, state) {
+    const target = $('#diagnostics-copy-status');
+    if (!target) return;
+    target.textContent = text;
+    target.className = 's-status ' + (DIAGNOSTICS_STATE_CLASSES.has(state) ? state : 'neutral');
+    target.setAttribute('aria-live', 'polite');
+  }
+
+  function renderDiagnostics(snapshot) {
+    const permissions = diagnosticOwn(snapshot, 'permissions') || {};
+    const capture = diagnosticOwn(snapshot, 'capture') || {};
+    const microphone = diagnosticOwn(capture, 'microphone') || {};
+    const system = diagnosticOwn(capture, 'system') || {};
+    const stt = diagnosticOwn(snapshot, 'stt') || {};
+    const chat = diagnosticOwn(snapshot, 'chat') || {};
+    const failure = diagnosticOwn(snapshot, 'lastFailure') || null;
+
+    const microphonePermission = diagnosticOwn(permissions, 'microphone');
+    const screenPermission = diagnosticOwn(permissions, 'screen');
+    const microphoneState = diagnosticOwn(microphone, 'state');
+    const systemState = diagnosticOwn(system, 'state');
+    const sttState = diagnosticOwn(stt, 'state');
+    const sttProvider = diagnosticOwn(stt, 'provider');
+    const chatReady = diagnosticOwn(chat, 'ready');
+    const chatProvider = diagnosticOwn(chat, 'provider');
+
+    setDiagnosticState('diagnostics-mic-permission', diagnosticLabel(microphonePermission, 'Unknown'), diagnosticStateClass('permission', microphonePermission));
+    setDiagnosticState('diagnostics-mic-capture', diagnosticLabel(microphoneState, 'Off'), diagnosticStateClass('capture', microphoneState));
+    setDiagnosticState('diagnostics-screen-permission', diagnosticLabel(screenPermission, 'Unknown'), diagnosticStateClass('permission', screenPermission));
+    setDiagnosticState('diagnostics-system-capture', diagnosticLabel(systemState, 'Off'), diagnosticStateClass('capture', systemState));
+    setDiagnosticState('diagnostics-stt-provider', diagnosticLabel(sttState, 'Off') + (typeof sttProvider === 'string' ? ' · ' + diagnosticText(sttProvider, '') : ''), diagnosticStateClass('stt', sttState));
+    const chatLabel = chatReady === true
+      ? 'Ready' + (typeof chatProvider === 'string' ? ' · ' + diagnosticText(chatProvider, '') : '')
+      : (chatReady === false ? 'Not ready' : 'Unknown');
+    setDiagnosticState('diagnostics-ai-provider', chatLabel, diagnosticStateClass('chat', chatReady));
+
+    const failureTarget = $('#diagnostics-last-failure');
+    if (failureTarget) {
+      const message = diagnosticOwn(failure, 'message');
+      failureTarget.textContent = typeof message === 'string' && message ? diagnosticText(message, '') : 'No recent failure recorded.';
+    }
+  }
+
+  function setDiagnosticsSummary(summary) {
+    diagnosticsSummary = typeof summary === 'string' ? summary : '';
+    const button = $('#diagnostics-copy');
+    if (button) button.disabled = !diagnosticsSummary;
+  }
+
+  async function refreshDiagnostics() {
+    const requestVersion = ++diagnosticsFetchVersion;
+    clearTimeout(diagnosticsCopyTimer);
+    const copyButton = $('#diagnostics-copy');
+    if (copyButton) copyButton.textContent = 'Copy diagnostic summary';
+    setDiagnosticsSummary('');
+    setDiagnosticsCopyStatus('Loading safe diagnostic summary…', 'neutral');
+    try {
+      const report = await cue.diagnosticsGet();
+      if (requestVersion !== diagnosticsFetchVersion || scrim.classList.contains('hidden')) return;
+      renderDiagnostics(diagnosticOwn(report, 'snapshot'));
+      setDiagnosticsSummary(diagnosticOwn(report, 'summary'));
+      setDiagnosticsCopyStatus(diagnosticsSummary ? 'Ready to copy.' : 'Diagnostic summary is unavailable.', diagnosticsSummary ? 'ok' : 'error');
+    } catch (_) {
+      if (requestVersion !== diagnosticsFetchVersion || scrim.classList.contains('hidden')) return;
+      renderDiagnostics(null);
+      setDiagnosticsSummary('');
+      setDiagnosticsCopyStatus('Could not load diagnostics. Try opening Settings again.', 'error');
+    }
+  }
+
   function openSettings() {
     fillSettings();
     scrim.classList.remove('hidden');
     refreshWhisperModels();
+    void refreshDiagnostics();
   }
-  function closeSettings() { saveSettings(); scrim.classList.add('hidden'); }
+  function closeSettings() {
+    diagnosticsFetchVersion += 1;
+    saveSettings();
+    scrim.classList.add('hidden');
+  }
   $('#more-btn').addEventListener('click', openSettings);
   $('#s-close').addEventListener('click', () => { void closeSettings(); });
   scrim.addEventListener('click', (e) => { if (e.target === scrim) void closeSettings(); });
+
+  $('#diagnostics-copy').addEventListener('click', async () => {
+    const button = $('#diagnostics-copy');
+    if (!diagnosticsSummary || !button) return;
+    button.disabled = true;
+    button.textContent = 'Copying…';
+    try {
+      await navigator.clipboard.writeText(diagnosticsSummary);
+      button.textContent = 'Copied';
+      setDiagnosticsCopyStatus('Safe diagnostic summary copied to clipboard.', 'ok');
+    } catch (_) {
+      button.textContent = 'Copy diagnostic summary';
+      setDiagnosticsCopyStatus('Could not copy the diagnostic summary. Check clipboard access and try again.', 'error');
+    } finally {
+      clearTimeout(diagnosticsCopyTimer);
+      diagnosticsCopyTimer = setTimeout(() => {
+        if (!button) return;
+        button.textContent = 'Copy diagnostic summary';
+        button.disabled = !diagnosticsSummary;
+      }, 1400);
+    }
+  });
+
+  cue.on('diagnostics:changed', (snapshot) => {
+    renderDiagnostics(snapshot);
+  });
 
   // Tab switching
   document.querySelectorAll('.s-tab').forEach((tab) => {
