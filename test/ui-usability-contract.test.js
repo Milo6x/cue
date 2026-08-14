@@ -14,14 +14,31 @@ function section(source, startMarker, endMarker) {
   return source.slice(start, end);
 }
 
-test('responsive controls wrap and the history drawer never shrinks or translates the main panel', () => {
+test('responsive controls wrap and compact history stays below the main panel without covering it', () => {
+  const html = read('renderer/index.html');
+  const renderer = read('renderer/renderer.js');
   const styles = read('renderer/styles.css');
+  const historyBase = section(styles, '.transcript-sidebar {', '.transcript-sidebar.hidden');
+  const wideLayout = section(styles, '@media (min-width: 980px)', '@media (max-width: 520px)');
+  const showHistory = section(renderer, '  function showSidebar() {', '  function hideSidebar() {');
 
   assert.match(styles, /#action-row\s*\{[^}]*flex-wrap:\s*wrap/);
   assert.match(styles, /\.s-seg\s*\{[^}]*flex-wrap:\s*wrap/);
   assert.match(styles, /\.ai-text, \.user-bubble, \.ts-text\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(styles, /html, body\s*\{[^}]*overflow-y:\s*auto/);
+  assert.match(styles, /#app\s*\{[^}]*min-height:\s*100%/);
   assert.match(styles, /#panel-wrap\.sidebar-open\s*\{[^}]*transform:\s*none/);
   assert.doesNotMatch(styles, /#panel-wrap\.sidebar-open\s*\{[^}]*width:\s*min\(420px/);
+  assert.match(historyBase, /position:\s*relative/);
+  assert.match(historyBase, /width:\s*min\(624px, calc\(100vw - 20px\)\)/);
+  assert.match(historyBase, /max-height:\s*min\(300px, calc\(100vh - 120px\)\)/);
+  assert.doesNotMatch(historyBase, /position:\s*(?:fixed|absolute)/);
+  assert.match(wideLayout, /\.transcript-sidebar\s*\{[^}]*position:\s*fixed/);
+  assert.match(wideLayout, /#panel-wrap\.sidebar-open\s*\{[^}]*margin-right:\s*260px/);
+  assert.match(html, /<\/div>\s*<\/div>\s*<!-- Transcript history card—below the main panel at compact widths -->\s*<div id="transcript-sidebar"/);
+  assert.match(html, /id="close-sidebar-btn"[\s\S]*id="clear-transcript-btn"/);
+  assert.match(showHistory, /matchMedia\('\(min-width: 980px\)'\)/);
+  assert.match(showHistory, /sidebar\.scrollIntoView\(\{ behavior: 'smooth', block: 'nearest' \}\)/);
 });
 
 test('speech remains in transcript history and never writes interim or final text into the manual composer', () => {

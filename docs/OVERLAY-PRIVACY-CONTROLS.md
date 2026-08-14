@@ -11,3 +11,5 @@ The state is owned by the main process. The renderer can read or change it only 
 `CUE_NO_PROTECT=1` remains a deliberate, local-development-only startup escape hatch. Only the exact value `1` disables protection by default; values such as `0`, `false`, or an empty value leave the default protection request on. The escape starts cue with screenshots allowed for support and does not make capture exclusion guarantees either way.
 
 Speech recognition is shown in the live transcript and Conversation History. It never populates, clears, or submits the manual chat composer; type a prompt there to send it.
+
+At cue's default and compact window widths, Conversation History opens as a full-width card below the assistant panel so it cannot cover an answer or action. The window scrolls when both cards do not fit vertically. At wide window widths, the history card may sit beside the assistant panel.

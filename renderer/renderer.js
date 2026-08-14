@@ -660,7 +660,12 @@
   function showSidebar() {
     const sidebar = document.getElementById('transcript-sidebar');
     const historyBtn = document.getElementById('history-btn');
-    if (sidebar) sidebar.classList.remove('hidden');
+    if (sidebar) {
+      sidebar.classList.remove('hidden');
+      if (!window.matchMedia('(min-width: 980px)').matches) {
+        requestAnimationFrame(() => sidebar.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+      }
+    }
     if (historyBtn) historyBtn.classList.add('active');
     const panelWrap = document.getElementById('panel-wrap');
     if (panelWrap) panelWrap.classList.add('sidebar-open');
