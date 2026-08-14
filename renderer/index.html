@@ -97,25 +97,25 @@
 
   <!-- Settings -->
   <div id="settings-scrim" class="hidden">
-    <div id="settings" class="glass">
+    <div id="settings" class="glass" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
       <div class="s-head">
-        <div class="s-title">Settings</div>
-        <button id="s-close" class="s-close">Done</button>
+        <div class="s-title" id="settings-title">Settings</div>
+        <button id="s-close" class="s-close" aria-label="Close settings">Done</button>
       </div>
 
       <!-- Tab bar -->
-      <div class="s-tabs">
-        <button class="s-tab on" data-tab="keys">🔑 Keys</button>
-        <button class="s-tab" data-tab="transcription">Audio</button>
-        <button class="s-tab" data-tab="profile">📄 Profile</button>
-        <button class="s-tab" data-tab="prep">🎯 Interview Prep</button>
-        <button class="s-tab" data-tab="style">✨ Style</button>
-        <button class="s-tab" data-tab="qa">💬 Q&amp;A</button>
-        <button class="s-tab" data-tab="health">Health</button>
+      <div class="s-tabs" role="tablist" aria-label="Settings sections">
+        <button id="settings-tab-keys" class="s-tab on" data-tab="keys" role="tab" aria-selected="true" aria-controls="settings-pane-keys" tabindex="0">🔑 Keys</button>
+        <button id="settings-tab-transcription" class="s-tab" data-tab="transcription" role="tab" aria-selected="false" aria-controls="settings-pane-transcription" tabindex="-1">Audio</button>
+        <button id="settings-tab-profile" class="s-tab" data-tab="profile" role="tab" aria-selected="false" aria-controls="settings-pane-profile" tabindex="-1">📄 Profile</button>
+        <button id="settings-tab-prep" class="s-tab" data-tab="prep" role="tab" aria-selected="false" aria-controls="settings-pane-prep" tabindex="-1">🎯 Interview Prep</button>
+        <button id="settings-tab-style" class="s-tab" data-tab="style" role="tab" aria-selected="false" aria-controls="settings-pane-style" tabindex="-1">✨ Style</button>
+        <button id="settings-tab-qa" class="s-tab" data-tab="qa" role="tab" aria-selected="false" aria-controls="settings-pane-qa" tabindex="-1">💬 Q&amp;A</button>
+        <button id="settings-tab-health" class="s-tab" data-tab="health" role="tab" aria-selected="false" aria-controls="settings-pane-health" tabindex="-1">Health</button>
       </div>
 
       <!-- Tab: Keys -->
-      <div class="s-body s-tab-pane" data-pane="keys">
+      <div id="settings-pane-keys" class="s-body s-tab-pane" data-pane="keys" role="tabpanel" aria-labelledby="settings-tab-keys">
         <label class="s-label">Provider</label>
         <div class="s-seg" id="provider-seg">
           <button data-provider="openai">OpenAI</button>
@@ -165,7 +165,7 @@
       </div>
 
       <!-- Tab: Transcription -->
-      <div class="s-body s-tab-pane hidden" data-pane="transcription">
+      <div id="settings-pane-transcription" class="s-body s-tab-pane hidden" data-pane="transcription" role="tabpanel" aria-labelledby="settings-tab-transcription">
         <label class="s-label">Speech-to-text provider</label>
         <div class="s-seg s-seg-wrap" id="stt-provider-seg">
           <button data-stt-provider="auto">Auto</button>
@@ -216,7 +216,7 @@
       </div>
 
       <!-- Tab: Profile -->
-      <div class="s-body s-tab-pane hidden" data-pane="profile">
+      <div id="settings-pane-profile" class="s-body s-tab-pane hidden" data-pane="profile" role="tabpanel" aria-labelledby="settings-tab-profile">
         <label class="s-label">Your resume <span class="s-hint">paste full resume, or import a PDF/DOCX</span></label>
         <div class="s-field s-upload"><span class="s-filename" id="resume-filename"></span><button class="s-upload-btn" id="upload-resume-btn">Import PDF/DOCX</button></div>
         <textarea id="resume-text" rows="7" spellcheck="false" placeholder="Paste your full resume here. cue will extract Name, Summary, Experience, Skills, Projects, and Education automatically."></textarea>
@@ -227,7 +227,7 @@
       </div>
 
       <!-- Tab: Interview Prep -->
-      <div class="s-body s-tab-pane hidden" data-pane="prep">
+      <div id="settings-pane-prep" class="s-body s-tab-pane hidden" data-pane="prep" role="tabpanel" aria-labelledby="settings-tab-prep">
         <label class="s-label">Your STAR stories <span class="s-hint">write 3–5 real behavioral stories — used for "tell me about a time…" questions</span></label>
         <textarea id="star-stories" rows="8" spellcheck="false" placeholder="Story 1: At [Company], we faced [situation]. I was responsible for [task]. I did [specific actions]. The result was [outcome with metrics if possible].&#10;&#10;Story 2: ..."></textarea>
 
@@ -242,7 +242,7 @@
       </div>
 
       <!-- Tab: Q&A -->
-      <div class="s-body s-tab-pane hidden" data-pane="qa">
+      <div id="settings-pane-qa" class="s-body s-tab-pane hidden" data-pane="qa" role="tabpanel" aria-labelledby="settings-tab-qa">
         <label class="s-label">Salary target <span class="s-hint">used when asked about compensation</span></label>
         <input id="salary-target" type="text" placeholder="e.g. $150k–$180k base + equity, open to discuss total comp" autocomplete="off" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:13px;font-family:inherit;outline:none;" />
 
@@ -251,7 +251,7 @@
       </div>
 
       <!-- Tab: Style -->
-      <div class="s-body s-tab-pane hidden" data-pane="style">
+      <div id="settings-pane-style" class="s-body s-tab-pane hidden" data-pane="style" role="tabpanel" aria-labelledby="settings-tab-style">
         <label class="s-label">AI rules <span class="s-hint">how the AI should write its responses</span></label>
         <textarea id="ai-rules" rows="10" spellcheck="false" maxlength="2000" placeholder="e.g.
 - Never use em-dashes.
@@ -267,7 +267,7 @@
       </div>
 
       <!-- Tab: Health -->
-      <div class="s-body s-tab-pane hidden" data-pane="health">
+      <div id="settings-pane-health" class="s-body s-tab-pane hidden" data-pane="health" role="tabpanel" aria-labelledby="settings-tab-health">
         <div class="diagnostics-note">Privacy: keys, transcripts, audio, and screenshots are never included in diagnostics.</div>
         <div class="diagnostics-list" aria-label="Capture diagnostics">
           <div class="diagnostics-row"><span>Microphone permission</span><span id="diagnostics-mic-permission" class="diagnostics-state neutral">Checking…</span></div>

@@ -77,7 +77,7 @@ test('renderer exposes a compact, live diagnostics pane that copies only the sup
   const renderer = read('renderer/renderer.js');
   const styles = read('renderer/styles.css');
 
-  assert.match(html, /<button class="s-tab" data-tab="health">Health<\/button>/);
+  assert.match(html, /<button[^>]*data-tab="health"[^>]*>Health<\/button>/);
   assert.match(html, /data-pane="health"/);
   assert.match(html, /id="diagnostics-mic-permission"/);
   assert.match(html, /id="diagnostics-mic-capture"/);
@@ -92,7 +92,7 @@ test('renderer exposes a compact, live diagnostics pane that copies only the sup
   assert.match(renderer, /cue\.diagnosticsGet\(\)/);
   assert.equal((renderer.match(/cue\.on\('diagnostics:changed'/g) || []).length, 1, 'subscribe only once');
   assert.match(renderer, /const copySummary = diagnosticsSummary;/);
-  assert.match(renderer, /navigator\.clipboard\.writeText\(copySummary\)/);
+  assert.match(renderer, /writeDiagnosticsSummary\(copySummary\)/);
   assert.doesNotMatch(renderer, /navigator\.clipboard\.writeText\([^)]*innerHTML/);
   assert.match(renderer, /DIAGNOSTICS_STATE_CLASSES/);
   assert.match(renderer, /aria-live/);
@@ -110,7 +110,61 @@ test('renderer ignores an old clipboard result after the diagnostics settings se
   assert.match(closeSettings, /diagnosticsSessionVersion \+= 1;/);
   assert.match(copyHandler, /const copySessionVersion = diagnosticsSessionVersion;/);
   assert.match(copyHandler, /const copySummary = diagnosticsSummary;/);
-  assert.match(copyHandler, /navigator\.clipboard\.writeText\(copySummary\)/);
+  assert.match(copyHandler, /writeDiagnosticsSummary\(copySummary\)/);
   assert.match(copyHandler, /if \(!isCurrentDiagnosticsSession\(copySessionVersion, copySummary\)\) return;/);
   assert.match(copyHandler, /setTimeout\(\(\) => \{\s*if \(!isCurrentDiagnosticsSession\(copySessionVersion, copySummary\)\) return;/);
+});
+
+test('renderer refreshes live diagnostics through the safe main-process summary without feedback loops', () => {
+  const renderer = read('renderer/renderer.js');
+  const refresh = section(renderer, '  async function refreshDiagnostics(expectedFingerprint = null)', '  function settingsFocusableElements() {');
+  const changedHandler = section(renderer, "  cue.on('diagnostics:changed'", '  // Tab switching');
+
+  assert.match(renderer, /let diagnosticsRefreshTimer = null;/);
+  assert.match(renderer, /function diagnosticFingerprint\(snapshot\)/);
+  assert.match(renderer, /function scheduleDiagnosticsRefresh\(snapshot\)/);
+  assert.match(refresh, /renderDiagnosticsLoading\(/);
+  assert.match(refresh, /const report = await cue\.diagnosticsGet\(\)/);
+  assert.match(refresh, /applyDiagnosticsReport\(report\)/);
+  assert.match(changedHandler, /scheduleDiagnosticsRefresh\(snapshot\)/);
+  assert.doesNotMatch(changedHandler, /renderDiagnostics\(snapshot\)/);
+  assert.equal((renderer.match(/cue\.on\('diagnostics:changed'/g) || []).length, 1, 'subscribe only once');
+  assert.match(renderer, /expectedFingerprint === lastDiagnosticsFingerprint/);
+});
+
+test('settings is an accessible keyboard modal with visible two-row tab navigation', () => {
+  const html = read('renderer/index.html');
+  const renderer = read('renderer/renderer.js');
+  const styles = read('renderer/styles.css');
+
+  assert.match(html, /id="settings" class="glass" role="dialog" aria-modal="true" aria-labelledby="settings-title"/);
+  assert.match(html, /id="settings-title"/);
+  assert.match(html, /class="s-tabs" role="tablist"/);
+  for (const tab of ['keys', 'transcription', 'profile', 'prep', 'style', 'qa', 'health']) {
+    assert.match(html, new RegExp(`id="settings-tab-${tab}"[\\s\\S]*?role="tab"[\\s\\S]*?aria-controls="settings-pane-${tab}"`));
+    assert.match(html, new RegExp(`id="settings-pane-${tab}"[\\s\\S]*?role="tabpanel"[\\s\\S]*?aria-labelledby="settings-tab-${tab}"`));
+  }
+  assert.match(renderer, /function activateSettingsTab\(/);
+  assert.match(renderer, /ArrowRight/);
+  assert.match(renderer, /ArrowLeft/);
+  assert.match(renderer, /Home/);
+  assert.match(renderer, /End/);
+  assert.match(renderer, /function trapSettingsFocus\(/);
+  assert.match(renderer, /settingsReturnFocus/);
+  assert.match(styles, /grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\)/);
+  assert.doesNotMatch(styles, /\.s-tabs[^}]*overflow-x:\s*auto/);
+  assert.match(styles, /#settings :is\(button, input, textarea, select\):focus-visible/);
+  assert.match(styles, /\.diagnostics-note, \.diagnostics-message \{\s*color: var\(--tx-2\)/);
+  assert.match(styles, /\.diagnostics-state \{[\s\S]*?color: var\(--tx-2\)/);
+});
+
+test('diagnostics clipboard writes time out and restore the current controls', () => {
+  const renderer = read('renderer/renderer.js');
+  const copyHandler = section(renderer, "  $('#diagnostics-copy').addEventListener", "  cue.on('diagnostics:changed'");
+
+  assert.match(renderer, /const DIAGNOSTICS_CLIPBOARD_TIMEOUT_MS = \d+;/);
+  assert.match(renderer, /function writeDiagnosticsSummary\(summary\)/);
+  assert.match(renderer, /Promise\.race\(/);
+  assert.match(copyHandler, /await writeDiagnosticsSummary\(copySummary\)/);
+  assert.match(copyHandler, /button\.disabled = !diagnosticsSummary;/);
 });

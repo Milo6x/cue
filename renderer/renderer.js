@@ -1323,10 +1323,16 @@
   // ---- settings ----------------------------------------------------------
   const scrim = $('#settings-scrim');
   const DIAGNOSTICS_STATE_CLASSES = new Set(['neutral', 'ok', 'warn', 'error']);
+  const DIAGNOSTICS_REFRESH_DELAY_MS = 90;
+  const DIAGNOSTICS_CLIPBOARD_TIMEOUT_MS = 3500;
   let diagnosticsSummary = '';
   let diagnosticsFetchVersion = 0;
   let diagnosticsSessionVersion = 0;
   let diagnosticsCopyTimer = null;
+  let diagnosticsRefreshTimer = null;
+  let lastDiagnosticsFingerprint = null;
+  let pendingDiagnosticsFingerprint = null;
+  let settingsReturnFocus = null;
 
   function diagnosticOwn(value, key) {
     if (!value || typeof value !== 'object') return undefined;
@@ -1347,6 +1353,24 @@
   function diagnosticLabel(value, fallback) {
     const text = diagnosticText(value, fallback);
     return text.replace(/-/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+
+  function diagnosticFingerprint(snapshot) {
+    const permissions = diagnosticOwn(snapshot, 'permissions') || {};
+    const capture = diagnosticOwn(snapshot, 'capture') || {};
+    const microphone = diagnosticOwn(capture, 'microphone') || {};
+    const system = diagnosticOwn(capture, 'system') || {};
+    const stt = diagnosticOwn(snapshot, 'stt') || {};
+    const chat = diagnosticOwn(snapshot, 'chat') || {};
+    const failure = diagnosticOwn(snapshot, 'lastFailure') || {};
+    const values = [
+      diagnosticOwn(permissions, 'microphone'), diagnosticOwn(permissions, 'screen'),
+      diagnosticOwn(microphone, 'state'), diagnosticOwn(system, 'state'),
+      diagnosticOwn(stt, 'provider'), diagnosticOwn(stt, 'state'),
+      diagnosticOwn(chat, 'provider'), diagnosticOwn(chat, 'ready'),
+      diagnosticOwn(failure, 'category'), diagnosticOwn(failure, 'channel'), diagnosticOwn(failure, 'message')
+    ];
+    return values.map((value) => diagnosticText(value, '')).join('\u001f');
   }
 
   function diagnosticStateClass(kind, value) {
@@ -1419,49 +1443,180 @@
     if (button) button.disabled = !diagnosticsSummary;
   }
 
+  function renderDiagnosticsLoading(message) {
+    for (const id of [
+      'diagnostics-mic-permission', 'diagnostics-mic-capture',
+      'diagnostics-screen-permission', 'diagnostics-system-capture',
+      'diagnostics-stt-provider', 'diagnostics-ai-provider'
+    ]) {
+      setDiagnosticState(id, 'Refreshing…', 'neutral');
+    }
+    const failureTarget = $('#diagnostics-last-failure');
+    if (failureTarget) failureTarget.textContent = message || 'Refreshing diagnostics…';
+  }
+
+  function applyDiagnosticsReport(report) {
+    const snapshot = diagnosticOwn(report, 'snapshot');
+    const summary = diagnosticOwn(report, 'summary');
+    lastDiagnosticsFingerprint = diagnosticFingerprint(snapshot);
+    pendingDiagnosticsFingerprint = null;
+    renderDiagnostics(snapshot);
+    setDiagnosticsSummary(summary);
+    setDiagnosticsCopyStatus(diagnosticsSummary ? 'Ready to copy.' : 'Diagnostic summary is unavailable.', diagnosticsSummary ? 'ok' : 'error');
+  }
+
   function isCurrentDiagnosticsSession(sessionVersion, summary) {
     return sessionVersion === diagnosticsSessionVersion
       && !scrim.classList.contains('hidden')
       && summary === diagnosticsSummary;
   }
 
-  async function refreshDiagnostics() {
+  function writeDiagnosticsSummary(summary) {
+    let timeoutId = null;
+    const write = Promise.resolve().then(() => {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('Clipboard access is unavailable.');
+      }
+      return navigator.clipboard.writeText(summary);
+    });
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('Clipboard write timed out.')), DIAGNOSTICS_CLIPBOARD_TIMEOUT_MS);
+    });
+    return Promise.race([write, timeout]).finally(() => clearTimeout(timeoutId));
+  }
+
+  function queueDiagnosticsRefresh() {
+    if (diagnosticsRefreshTimer) return;
+    diagnosticsRefreshTimer = setTimeout(() => {
+      diagnosticsRefreshTimer = null;
+      const expectedFingerprint = pendingDiagnosticsFingerprint;
+      if (scrim.classList.contains('hidden') || expectedFingerprint === lastDiagnosticsFingerprint) return;
+      void refreshDiagnostics(expectedFingerprint);
+    }, DIAGNOSTICS_REFRESH_DELAY_MS);
+  }
+
+  function scheduleDiagnosticsRefresh(snapshot) {
+    if (scrim.classList.contains('hidden')) return;
+    const fingerprint = diagnosticFingerprint(snapshot);
+    if (fingerprint === lastDiagnosticsFingerprint) return;
+    pendingDiagnosticsFingerprint = fingerprint;
+    renderDiagnosticsLoading('Refreshing diagnostic summary…');
+    setDiagnosticsSummary('');
+    setDiagnosticsCopyStatus('Refreshing safe diagnostic summary…', 'neutral');
+    queueDiagnosticsRefresh();
+  }
+
+  async function refreshDiagnostics(expectedFingerprint = null) {
     const requestVersion = ++diagnosticsFetchVersion;
+    clearTimeout(diagnosticsRefreshTimer);
+    diagnosticsRefreshTimer = null;
+    if (!expectedFingerprint) pendingDiagnosticsFingerprint = null;
     clearTimeout(diagnosticsCopyTimer);
     const copyButton = $('#diagnostics-copy');
     if (copyButton) copyButton.textContent = 'Copy diagnostic summary';
     setDiagnosticsSummary('');
+    renderDiagnosticsLoading('Loading diagnostics…');
     setDiagnosticsCopyStatus('Loading safe diagnostic summary…', 'neutral');
     try {
       const report = await cue.diagnosticsGet();
       if (requestVersion !== diagnosticsFetchVersion || scrim.classList.contains('hidden')) return;
-      renderDiagnostics(diagnosticOwn(report, 'snapshot'));
-      setDiagnosticsSummary(diagnosticOwn(report, 'summary'));
-      setDiagnosticsCopyStatus(diagnosticsSummary ? 'Ready to copy.' : 'Diagnostic summary is unavailable.', diagnosticsSummary ? 'ok' : 'error');
+      const reportFingerprint = diagnosticFingerprint(diagnosticOwn(report, 'snapshot'));
+      const requiredFingerprint = pendingDiagnosticsFingerprint || expectedFingerprint;
+      if (requiredFingerprint && reportFingerprint !== requiredFingerprint) {
+        queueDiagnosticsRefresh();
+        return;
+      }
+      applyDiagnosticsReport(report);
     } catch (_) {
       if (requestVersion !== diagnosticsFetchVersion || scrim.classList.contains('hidden')) return;
-      renderDiagnostics(null);
+      renderDiagnosticsLoading('Diagnostics could not be loaded.');
       setDiagnosticsSummary('');
       setDiagnosticsCopyStatus('Could not load diagnostics. Try opening Settings again.', 'error');
     }
   }
 
+  function settingsFocusableElements() {
+    return Array.from($('#settings').querySelectorAll('button, input, textarea, select, [tabindex]'))
+      .filter((element) => !element.disabled && element.tabIndex >= 0 && !element.closest('.hidden'));
+  }
+
+  function activeSettingsTab() {
+    return document.querySelector('.s-tab[aria-selected="true"]') || document.querySelector('.s-tab.on');
+  }
+
+  function focusActiveSettingsTab() {
+    const tab = activeSettingsTab();
+    (tab || $('#s-close')).focus();
+  }
+
+  async function activateSettingsTab(tab, { focus = false } = {}) {
+    if (!tab) return false;
+    if (!tab.classList.contains('on') && !(await saveSettings())) return false;
+    document.querySelectorAll('.s-tab').forEach((candidate) => {
+      const selected = candidate === tab;
+      candidate.classList.toggle('on', selected);
+      candidate.setAttribute('aria-selected', String(selected));
+      candidate.tabIndex = selected ? 0 : -1;
+    });
+    document.querySelectorAll('.s-tab-pane').forEach((pane) => pane.classList.add('hidden'));
+    const pane = document.querySelector(`.s-tab-pane[data-pane="${tab.dataset.tab}"]`);
+    if (pane) pane.classList.remove('hidden');
+    if (focus) tab.focus();
+    return true;
+  }
+
+  function trapSettingsFocus(event) {
+    if (scrim.classList.contains('hidden')) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSettings();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = settingsFocusableElements();
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   function openSettings() {
+    if (scrim.classList.contains('hidden')) settingsReturnFocus = document.activeElement;
     diagnosticsSessionVersion += 1;
     fillSettings();
     scrim.classList.remove('hidden');
     refreshWhisperModels();
     void refreshDiagnostics();
+    requestAnimationFrame(focusActiveSettingsTab);
   }
   function closeSettings() {
+    if (scrim.classList.contains('hidden')) return;
     diagnosticsSessionVersion += 1;
     diagnosticsFetchVersion += 1;
+    clearTimeout(diagnosticsRefreshTimer);
+    diagnosticsRefreshTimer = null;
+    pendingDiagnosticsFingerprint = null;
     saveSettings();
     scrim.classList.add('hidden');
+    const restoreFocus = settingsReturnFocus;
+    settingsReturnFocus = null;
+    if (restoreFocus && typeof restoreFocus.focus === 'function' && document.contains(restoreFocus)) {
+      requestAnimationFrame(() => restoreFocus.focus());
+    }
   }
   $('#more-btn').addEventListener('click', openSettings);
   $('#s-close').addEventListener('click', () => { void closeSettings(); });
   scrim.addEventListener('click', (e) => { if (e.target === scrim) void closeSettings(); });
+  document.addEventListener('keydown', trapSettingsFocus);
 
   $('#diagnostics-copy').addEventListener('click', async () => {
     const button = $('#diagnostics-copy');
@@ -1471,7 +1626,7 @@
     button.disabled = true;
     button.textContent = 'Copying…';
     try {
-      await navigator.clipboard.writeText(copySummary);
+      await writeDiagnosticsSummary(copySummary);
       if (!isCurrentDiagnosticsSession(copySessionVersion, copySummary)) return;
       button.textContent = 'Copied';
       setDiagnosticsCopyStatus('Safe diagnostic summary copied to clipboard.', 'ok');
@@ -1492,19 +1647,22 @@
   });
 
   cue.on('diagnostics:changed', (snapshot) => {
-    renderDiagnostics(snapshot);
+    scheduleDiagnosticsRefresh(snapshot);
   });
 
   // Tab switching
   document.querySelectorAll('.s-tab').forEach((tab) => {
-    tab.addEventListener('click', async () => {
-      if (tab.classList.contains('on')) return;
-      if (!(await saveSettings())) return;
-      document.querySelectorAll('.s-tab').forEach(t => t.classList.remove('on'));
-      document.querySelectorAll('.s-tab-pane').forEach(p => p.classList.add('hidden'));
-      tab.classList.add('on');
-      const pane = document.querySelector(`.s-tab-pane[data-pane="${tab.dataset.tab}"]`);
-      if (pane) pane.classList.remove('hidden');
+    tab.addEventListener('click', () => { void activateSettingsTab(tab); });
+    tab.addEventListener('keydown', (event) => {
+      const keys = ['ArrowRight', 'ArrowLeft', 'Home', 'End'];
+      if (!keys.includes(event.key)) return;
+      event.preventDefault();
+      const tabs = Array.from(document.querySelectorAll('.s-tab'));
+      const current = tabs.indexOf(tab);
+      const next = event.key === 'Home' ? 0
+        : event.key === 'End' ? tabs.length - 1
+          : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      void activateSettingsTab(tabs[next], { focus: true });
     });
   });
 
@@ -1848,7 +2006,7 @@
 
   // ---- global keys -------------------------------------------------------
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !scrim.classList.contains('hidden')) closeSettings();
+    if (e.key === 'Escape' && !e.defaultPrevented && !scrim.classList.contains('hidden')) closeSettings();
     if ((e.metaKey || e.ctrlKey) && e.key === ',') { e.preventDefault(); openSettings(); }
   });
 
