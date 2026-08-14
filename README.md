@@ -154,6 +154,8 @@ Open **Settings → Health** for microphone permission, microphone capture, Scre
 
 Capture has fixed states **off**, **starting**, **ready**, and **failed**. During shutdown, the listening session and speech-to-text can show **stopping**; streaming speech-to-text can also show **disconnected** while it reconnects or reports failure. A ready microphone with failed Meeting audio (or the reverse) is a partial, usable listening session rather than a reason to stop both channels.
 
+While a channel is ready, Health also shows its actual Web Audio sample rate, channel count, processed-frame count, and a coarse **present** or **silent** signal state. Cue normalizes each accepted capture packet to the 16 kHz mono contract required by its speech pipeline; the requested `AudioContext` rate is not treated as proof that Chromium honored it. This telemetry contains no PCM, transcript, device labels, or audio content. For a macOS loopback check, start listening, play a short `/usr/bin/say` phrase while sharing system audio, and confirm that Meeting’s frame count grows and its signal becomes **present**. A ready but continuously **silent** Meeting channel identifies a loopback-delivery problem in the current Electron/macOS stack; it does not prove transcription is working.
+
 | What Health reports | Recovery |
 |---|---|
 | Permission denied | Enable cue at the exact macOS paths above, quit/reopen it, and re-grant after an ad-hoc rebuild if necessary. |
@@ -165,7 +167,7 @@ Capture has fixed states **off**, **starting**, **ready**, and **failed**. Durin
 | Network, service, or timeout | Check the connection, then retry; temporary provider failures can recover without changing capture permissions. |
 | Local model/runtime problem | In **Settings → Audio**, download or import a verified model. For source runs, prepare the runtime with `npm run prepare:whisper`. |
 
-The **Copy diagnostic summary** control is intentionally safe to share for support: it excludes API keys, transcript content, captured audio, and screenshots.
+The **Copy diagnostic summary** control is intentionally safe to share for support: it excludes API keys, transcript content, captured audio, and screenshots. The live Health view uses only bounded capture metadata (rate, channel count, frame count, and signal state).
 
 ## How it works
 

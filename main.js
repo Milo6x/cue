@@ -9,6 +9,7 @@ const { createLLM } = require('./src/llm');
 const { runStreamWithPolicy } = require('./src/request-policy');
 const { MODES } = require('./src/prompts');
 const { rms16 } = require('./src/wav');
+const { normalizeCapturePacket } = require('./src/capture-pcm');
 const { createStreamingSTT } = require('./src/stt-streaming');
 const { AdaptiveVAD, AudioRingBuffer } = require('./src/vad');
 const { buildInterviewContext, detectCategory } = require('./src/interview-context');
@@ -127,6 +128,23 @@ const ringBuffers = {
   you: new AudioRingBuffer(300, 16000),
   them: new AudioRingBuffer(300, 16000)
 };
+// Capture packets arrive only from our live renderer. These counters are deliberately
+// metadata-only: Health needs to distinguish an absent/silent loopback track from a
+// working one without retaining raw audio or transcript content.
+const captureAudioStats = {
+  you: { packets: 0, frames: 0, lastReportAt: 0, signal: 'unknown' },
+  them: { packets: 0, frames: 0, lastReportAt: 0, signal: 'unknown' }
+};
+const CAPTURE_DIAGNOSTICS_INTERVAL_MS = 1000;
+
+function resetCaptureAudioStats() {
+  for (const stats of Object.values(captureAudioStats)) {
+    stats.packets = 0;
+    stats.frames = 0;
+    stats.lastReportAt = 0;
+    stats.signal = 'unknown';
+  }
+}
 
 function send(channel, data) { if (win && !win.isDestroyed()) win.webContents.send(channel, data); }
 
@@ -505,6 +523,33 @@ function routeAudio(channel, pcmBuffer) {
   }
 }
 
+function routeCapturePacket(event, channel, packet) {
+  if (!isCueRenderer(event) || !state.capturing) return;
+  const normalized = normalizeCapturePacket(packet);
+  if (!normalized) return;
+
+  const stats = captureAudioStats[channel];
+  if (!stats) return;
+  stats.packets += 1;
+  stats.frames += normalized.pcm.length / 2;
+  const signal = rms16(normalized.pcm) >= RMS_GATE ? 'present' : 'silent';
+  const now = Date.now();
+  if (diagnostics && (stats.packets === 1 || signal !== stats.signal || now - stats.lastReportAt >= CAPTURE_DIAGNOSTICS_INTERVAL_MS)) {
+    diagnostics.recordCaptureAudio(channel === 'you' ? 'microphone' : 'system', {
+      sampleRate: normalized.sampleRate,
+      channelCount: normalized.channelCount,
+      packets: stats.packets,
+      frames: stats.frames,
+      signal
+    });
+    stats.lastReportAt = now;
+  }
+  stats.signal = signal;
+  // All downstream recognizers require 16 kHz mono PCM; normalizeCapturePacket
+  // enforces that invariant even when Chromium ignores the requested context rate.
+  routeAudio(channel, normalized.pcm);
+}
+
 // -------- capture toggle --------
 // Mic + system audio are both captured in the RENDERER (getUserMedia for the mic,
 // getDisplayMedia loopback for system audio) so they run inside cue's own process
@@ -513,6 +558,7 @@ async function setCapturing(active) {
   if (active === state.capturing) return state.capturing;
 
   if (active) {
+    resetCaptureAudioStats();
     sttDisabled = false; // reset on re-enable
     const settings = store.getSettings();
     if ((settings.sttProvider || 'auto') === 'local') {
@@ -561,6 +607,7 @@ async function setCapturing(active) {
   }
 
   state.capturing = false;
+  resetCaptureAudioStats();
   if (diagnostics) {
     diagnostics.updateCapture('microphone', { state: 'off' });
     diagnostics.updateCapture('system', { state: 'off' });
@@ -759,8 +806,8 @@ ipcMain.handle('transcript:clear', () => {
   return { ok: true };
 });
 ipcMain.on('ask', (_e, payload) => runFeature(payload.mode, payload.text));
-ipcMain.on('mic:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('you', arrayBuffer); });
-ipcMain.on('system:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('them', arrayBuffer); });
+ipcMain.on('mic:pcm', (event, packet) => routeCapturePacket(event, 'you', packet));
+ipcMain.on('system:pcm', (event, packet) => routeCapturePacket(event, 'them', packet));
 ipcMain.on('mouse:ignore', (_e, v) => { if (win) win.setIgnoreMouseEvents(!!v, { forward: true }); });
 ipcMain.on('open-pane', (_e, url) => { shell.openExternal(url).catch(() => {}); });
 ipcMain.on('app:quit', () => app.quit());

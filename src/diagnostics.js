@@ -26,6 +26,7 @@ const FAILURE_MESSAGES = {
 const UNSAFE_TEXT_RE = /\b(?:transcript|screenshot|cookie|session(?:id)?|password)\b|data:(?:audio|image)|base64/i;
 const SAFE_ID_RE = /^[A-Za-z0-9._:/-]{1,180}$/;
 const SAFE_TRACK_LABEL_RE = /^[A-Za-z0-9 ._()\-]{1,120}$/;
+const CAPTURE_SIGNALS = new Set(['unknown', 'silent', 'present']);
 
 function readOwn(value, key) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function')) return undefined;
@@ -61,8 +62,8 @@ function cloneSnapshot(state) {
     app: { ...state.app },
     permissions: { ...state.permissions },
     capture: {
-      microphone: { ...state.capture.microphone },
-      system: { ...state.capture.system }
+      microphone: { ...state.capture.microphone, telemetry: { ...state.capture.microphone.telemetry } },
+      system: { ...state.capture.system, telemetry: { ...state.capture.system.telemetry } }
     },
     chat: { ...state.chat },
     stt: { ...state.stt },
@@ -101,8 +102,8 @@ function createDiagnosticsStore({ appVersion, platform, arch, onChange } = {}) {
     },
     permissions: { microphone: 'unknown', screen: 'unknown' },
     capture: {
-      microphone: { state: 'off', category: null, message: null, trackLabel: null },
-      system: { state: 'off', category: null, message: null, trackLabel: null }
+      microphone: { state: 'off', category: null, message: null, trackLabel: null, telemetry: { sampleRate: null, channelCount: null, packets: 0, frames: 0, signal: 'unknown' } },
+      system: { state: 'off', category: null, message: null, trackLabel: null, telemetry: { sampleRate: null, channelCount: null, packets: 0, frames: 0, signal: 'unknown' } }
     },
     chat: { provider: null, model: null, ready: false },
     stt: { provider: null, state: 'off' },
@@ -153,6 +154,22 @@ function createDiagnosticsStore({ appVersion, platform, arch, onChange } = {}) {
       }
     }
     if (trackLabel !== null) target.trackLabel = trackLabel;
+    emit();
+    return true;
+  }
+
+  function recordCaptureAudio(channel, value) {
+    if (!CAPTURE_CHANNELS.has(channel) || !value || typeof value !== 'object') return false;
+    const sampleRate = readOwn(value, 'sampleRate');
+    const channelCount = readOwn(value, 'channelCount');
+    const packets = readOwn(value, 'packets');
+    const frames = readOwn(value, 'frames');
+    const signal = readOwn(value, 'signal');
+    if (!Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 192000) return false;
+    if (!Number.isInteger(channelCount) || channelCount < 1 || channelCount > 32) return false;
+    if (!Number.isSafeInteger(packets) || packets < 0 || !Number.isSafeInteger(frames) || frames < 0) return false;
+    if (!CAPTURE_SIGNALS.has(signal)) return false;
+    state.capture[channel].telemetry = { sampleRate, channelCount, packets, frames, signal };
     emit();
     return true;
   }
@@ -218,6 +235,7 @@ function createDiagnosticsStore({ appVersion, platform, arch, onChange } = {}) {
     updatePermissions,
     updateProviders,
     updateCapture,
+    recordCaptureAudio,
     recordFailure,
     report
   };

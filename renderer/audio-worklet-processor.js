@@ -8,15 +8,25 @@ class CueAudioProcessor extends AudioWorkletProcessor {
     this._bufferSize = 4096; // accumulate before sending (matches old ScriptProcessor)
     this._buffer = new Float32Array(this._bufferSize);
     this._writeIndex = 0;
+    this._channelCount = 1;
   }
 
   process(inputs, _outputs, _parameters) {
     const input = inputs[0];
-    if (!input || !input[0]) return true;
+    if (!input || !input.length || !input[0]) return true;
 
-    const channelData = input[0]; // mono
-    for (let i = 0; i < channelData.length; i++) {
-      this._buffer[this._writeIndex++] = channelData[i];
+    this._channelCount = input.length;
+    const frameCount = input[0].length;
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      let sum = 0;
+      let channels = 0;
+      for (let channel = 0; channel < input.length; channel += 1) {
+        const channelData = input[channel];
+        if (!channelData || frame >= channelData.length) continue;
+        sum += channelData[frame];
+        channels += 1;
+      }
+      this._buffer[this._writeIndex++] = channels ? sum / channels : 0;
       if (this._writeIndex >= this._bufferSize) {
         this._flush();
       }
@@ -31,7 +41,7 @@ class CueAudioProcessor extends AudioWorkletProcessor {
       const s = Math.max(-1, Math.min(1, this._buffer[i]));
       pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
     }
-    this.port.postMessage(pcm.buffer, [pcm.buffer]);
+    this.port.postMessage({ pcm: pcm.buffer, channelCount: this._channelCount }, [pcm.buffer]);
     this._buffer = new Float32Array(this._bufferSize);
     this._writeIndex = 0;
   }

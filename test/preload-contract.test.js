@@ -26,6 +26,18 @@ test('preload exposes deterministic capture and diagnostics bridge methods', () 
   assert.match(preload, /allowed\s*=\s*\[[\s\S]*?'capture:remote-stop'/);
 });
 
+test('capture PCM crosses the bridge only as a metadata envelope validated by main', () => {
+  const preload = read('preload.js');
+  const main = read('main.js');
+
+  assert.match(preload, /micPcm:\s*\(packet\)\s*=>\s*ipcRenderer\.send\('mic:pcm', packet\)/);
+  assert.match(preload, /systemPcm:\s*\(packet\)\s*=>\s*ipcRenderer\.send\('system:pcm', packet\)/);
+  assert.match(main, /const \{ normalizeCapturePacket \} = require\('\.\/src\/capture-pcm'\)/);
+  assert.match(main, /function routeCapturePacket\(event, channel, packet\)/);
+  assert.match(main, /if \(!isCueRenderer\(event\) \|\| !state\.capturing\) return;/);
+  assert.match(main, /const normalized = normalizeCapturePacket\(packet\);/);
+});
+
 test('renderer routes capture lifecycle through the coordinator, not toggle side effects', () => {
   const renderer = read('renderer/renderer.js');
   const buttonHandler = section(renderer, "$('#stop-btn').addEventListener('click'", '// Transcript toggle removed');
@@ -61,8 +73,20 @@ test('main serializes deterministic capture state requests', () => {
 test('renderer registers worklet resources before connecting them', () => {
   const renderer = read('renderer/renderer.js');
 
-  assert.match(renderer, /micWorklet = \{ source, node \};\s*node\.port\.onmessage[\s\S]{0,120}source\.connect\(node\)/);
-  assert.match(renderer, /sysWorklet = \{ source, node \};\s*node\.port\.onmessage[\s\S]{0,120}source\.connect\(node\)/);
+  assert.match(renderer, /micWorklet = \{ source, node, sink \};\s*node\.port\.onmessage[\s\S]{0,300}source\.connect\(node\)/);
+  assert.match(renderer, /sysWorklet = \{ source, node, sink \};\s*node\.port\.onmessage[\s\S]{0,300}source\.connect\(node\)/);
+});
+
+test('renderer reports actual audio context metadata and mixes every worklet channel to mono', () => {
+  const renderer = read('renderer/renderer.js');
+  const worklet = read('renderer/audio-worklet-processor.js');
+
+  assert.match(renderer, /await audioCtx\.resume\(\)/);
+  assert.match(renderer, /await sysCtx\.resume\(\)/);
+  assert.match(renderer, /sampleRate: audioCtx\.sampleRate/);
+  assert.match(renderer, /sampleRate: sysCtx\.sampleRate/);
+  assert.match(worklet, /for \(let channel = 0; channel < input\.length; channel \+= 1\)/);
+  assert.match(worklet, /channelData\[frame\]/);
 });
 
 test('renderer releases a failed worklet before using the legacy fallback', () => {

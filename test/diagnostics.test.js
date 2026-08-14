@@ -4,6 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { createDiagnosticsGetHandler, createDiagnosticsStore } = require('../src/diagnostics');
+const DEFAULT_CAPTURE_TELEMETRY = { sampleRate: null, channelCount: null, packets: 0, frames: 0, signal: 'unknown' };
 
 test('reports a fixed, credential-free runtime snapshot and summary', () => {
   const diagnostics = createDiagnosticsStore({ appVersion: '0.2.2', platform: 'darwin', arch: 'arm64' });
@@ -22,6 +23,29 @@ test('reports a fixed, credential-free runtime snapshot and summary', () => {
   assert.match(summary, /cue 0\.2\.2.*darwin\/arm64/);
   assert.match(summary, /Microphone: off.*System capture: off.*Chat: ready.*Transcription: ready/);
   assert.doesNotMatch(summary, /openai|gpt-4o-mini/i);
+});
+
+test('records only bounded capture signal telemetry without retaining renderer audio data', () => {
+  const diagnostics = createDiagnosticsStore({ appVersion: '1.0.0', platform: 'darwin', arch: 'arm64' });
+
+  assert.equal(diagnostics.recordCaptureAudio('system', {
+    sampleRate: 48000,
+    channelCount: 2,
+    packets: 3,
+    frames: 12288,
+    signal: 'present',
+    pcm: Buffer.from('private audio'),
+    transcript: 'private transcript'
+  }), true);
+
+  assert.deepEqual(diagnostics.snapshot().capture.system.telemetry, {
+    sampleRate: 48000,
+    channelCount: 2,
+    packets: 3,
+    frames: 12288,
+    signal: 'present'
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostics.snapshot()), /private|transcript|audio/i);
 });
 
 test('only accepts allowlisted renderer diagnostics fields and never retains nested data', () => {
@@ -46,7 +70,8 @@ test('only accepts allowlisted renderer diagnostics fields and never retains nes
     state: 'failed',
     category: 'permission',
     message: 'Permission was denied. Allow cue in System Settings and try again.',
-    trackLabel: 'Built-in Microphone'
+    trackLabel: 'Built-in Microphone',
+    telemetry: DEFAULT_CAPTURE_TELEMETRY
   });
   const serialized = JSON.stringify(snapshot);
   assert.doesNotMatch(serialized, /transcript|private|authorization|cookie|apikey/i);
@@ -73,8 +98,8 @@ test('maps only the two explicit capture channels from a renderer coordinator sn
   }), true);
 
   assert.deepEqual(diagnostics.snapshot().capture, {
-    microphone: { state: 'ready', category: null, message: null, trackLabel: 'MacBook Microphone' },
-    system: { state: 'failed', category: 'permission', message: 'Permission was denied. Allow cue in System Settings and try again.', trackLabel: null }
+    microphone: { state: 'ready', category: null, message: null, trackLabel: 'MacBook Microphone', telemetry: DEFAULT_CAPTURE_TELEMETRY },
+    system: { state: 'failed', category: 'permission', message: 'Permission was denied. Allow cue in System Settings and try again.', trackLabel: null, telemetry: DEFAULT_CAPTURE_TELEMETRY }
   });
   assert.doesNotMatch(JSON.stringify(diagnostics.snapshot()), /transcript|private|data:image|data:audio|screenshot|apikey/i);
 });
@@ -110,7 +135,7 @@ test('keeps only known state values when fed malformed or prototype-like reports
   assert.equal(diagnostics.report({ type: 'capture', channel: 'system', state: 'stealing', category: 'secret', message: 'data:audio/wav;base64,abc' }), true);
   const snapshot = diagnostics.snapshot();
 
-  assert.deepEqual(snapshot.capture.system, { state: 'off', category: null, message: null, trackLabel: null });
+  assert.deepEqual(snapshot.capture.system, { state: 'off', category: null, message: null, trackLabel: null, telemetry: DEFAULT_CAPTURE_TELEMETRY });
   assert.equal(Object.getPrototypeOf(snapshot.capture), Object.prototype);
 });
 

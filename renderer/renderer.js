@@ -602,7 +602,23 @@
       return;
     }
     worklet.node.port.onmessage = null;
-    safeDisconnect(worklet.node); safeDisconnect(worklet.source);
+    safeDisconnect(worklet.node); safeDisconnect(worklet.source); safeDisconnect(worklet.sink);
+  }
+
+  function mixAudioBufferToMonoPcm(audioBuffer) {
+    const channelCount = Math.max(1, audioBuffer.numberOfChannels || 1);
+    const channels = [];
+    for (let channel = 0; channel < channelCount; channel += 1) {
+      channels.push(audioBuffer.getChannelData(channel));
+    }
+    const pcm = new Int16Array(audioBuffer.length);
+    for (let frame = 0; frame < audioBuffer.length; frame += 1) {
+      let sum = 0;
+      for (const channelData of channels) sum += channelData[frame] || 0;
+      const sample = Math.max(-1, Math.min(1, sum / channels.length));
+      pcm[frame] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    }
+    return { pcm: pcm.buffer, channelCount };
   }
 
   function stopTracks(stream) {
@@ -687,14 +703,23 @@
       else micTrack.onended = micTrackEnded;
       cue.log('microphone capture started');
       audioCtx = new AudioContext({ sampleRate: 16000 });
+      await audioCtx.resume();
+      if (audioCtx.state !== 'running') {
+        throw captureError('capture', 'Microphone audio processing is suspended. Try listening again.');
+      }
       try {
         await audioCtx.audioWorklet.addModule('audio-worklet-processor.js');
         if (generation !== micGeneration) throw captureError('cancelled', 'Microphone startup was cancelled.');
         const source = audioCtx.createMediaStreamSource(micStream);
         const node = new AudioWorkletNode(audioCtx, 'cue-audio-processor');
-        micWorklet = { source, node };
-        node.port.onmessage = (event) => cue.micPcm(event.data);
-        source.connect(node);
+        const sink = audioCtx.createGain(); sink.gain.value = 0;
+        micWorklet = { source, node, sink };
+        node.port.onmessage = (event) => {
+          const packet = event.data;
+          if (!packet || !(packet.pcm instanceof ArrayBuffer)) return;
+          cue.micPcm({ pcm: packet.pcm, sampleRate: audioCtx.sampleRate, channelCount: packet.channelCount });
+        };
+        source.connect(node); node.connect(sink); sink.connect(audioCtx.destination);
       } catch (workletError) {
         if (workletError && workletError.category) throw workletError;
         disconnectWorklet(micWorklet);
@@ -705,10 +730,8 @@
         micWorklet = { _legacy: true, proc, node, sink };
         node.connect(proc); proc.connect(sink); sink.connect(audioCtx.destination);
         proc.onaudioprocess = (event) => {
-          const frames = event.inputBuffer.getChannelData(0);
-          const pcm = new Int16Array(frames.length);
-          for (let i = 0; i < frames.length; i++) { const sample = Math.max(-1, Math.min(1, frames[i])); pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff; }
-          cue.micPcm(pcm.buffer);
+          const packet = mixAudioBufferToMonoPcm(event.inputBuffer);
+          cue.micPcm({ pcm: packet.pcm, sampleRate: audioCtx.sampleRate, channelCount: packet.channelCount });
         };
       }
       return { trackLabel: micTrack.label || null };
@@ -776,14 +799,23 @@
       else sysTrack.onended = sysTrackEnded;
       cue.log('system audio capture started');
       sysCtx = new AudioContext({ sampleRate: 16000 });
+      await sysCtx.resume();
+      if (sysCtx.state !== 'running') {
+        throw captureError('capture', 'Meeting audio processing is suspended. Try listening again.');
+      }
       try {
         await sysCtx.audioWorklet.addModule('audio-worklet-processor.js');
         if (generation !== sysGeneration) throw captureError('cancelled', 'Meeting audio startup was cancelled.');
         const source = sysCtx.createMediaStreamSource(new MediaStream([sysTrack]));
         const node = new AudioWorkletNode(sysCtx, 'cue-audio-processor');
-        sysWorklet = { source, node };
-        node.port.onmessage = (event) => cue.systemPcm(event.data);
-        source.connect(node);
+        const sink = sysCtx.createGain(); sink.gain.value = 0;
+        sysWorklet = { source, node, sink };
+        node.port.onmessage = (event) => {
+          const packet = event.data;
+          if (!packet || !(packet.pcm instanceof ArrayBuffer)) return;
+          cue.systemPcm({ pcm: packet.pcm, sampleRate: sysCtx.sampleRate, channelCount: packet.channelCount });
+        };
+        source.connect(node); node.connect(sink); sink.connect(sysCtx.destination);
       } catch (workletError) {
         if (workletError && workletError.category) throw workletError;
         disconnectWorklet(sysWorklet);
@@ -794,10 +826,8 @@
         sysWorklet = { _legacy: true, proc, node, sink };
         node.connect(proc); proc.connect(sink); sink.connect(sysCtx.destination);
         proc.onaudioprocess = (event) => {
-          const frames = event.inputBuffer.getChannelData(0);
-          const pcm = new Int16Array(frames.length);
-          for (let i = 0; i < frames.length; i++) { const sample = Math.max(-1, Math.min(1, frames[i])); pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff; }
-          cue.systemPcm(pcm.buffer);
+          const packet = mixAudioBufferToMonoPcm(event.inputBuffer);
+          cue.systemPcm({ pcm: packet.pcm, sampleRate: sysCtx.sampleRate, channelCount: packet.channelCount });
         };
       }
       return { trackLabel: sysTrack.label || null };
@@ -1306,17 +1336,35 @@
     return text.replace(/-/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
 
+  function captureDiagnosticLabel(capture, state, fallback) {
+    const label = diagnosticLabel(state, fallback);
+    const telemetry = diagnosticOwn(capture, 'telemetry') || {};
+    const sampleRate = diagnosticOwn(telemetry, 'sampleRate');
+    const channelCount = diagnosticOwn(telemetry, 'channelCount');
+    const frames = diagnosticOwn(telemetry, 'frames');
+    const signal = diagnosticOwn(telemetry, 'signal');
+    if (state !== 'ready' || !Number.isInteger(sampleRate) || !Number.isInteger(channelCount)) return label;
+    const details = [Math.round(sampleRate / 1000) + ' kHz', channelCount + ' ch'];
+    if (signal === 'present' || signal === 'silent') details.push(signal);
+    if (Number.isSafeInteger(frames) && frames > 0) details.push(frames.toLocaleString('en-US') + ' frames');
+    return label + ' · ' + details.join(' · ');
+  }
+
   function diagnosticFingerprint(snapshot) {
     const permissions = diagnosticOwn(snapshot, 'permissions') || {};
     const capture = diagnosticOwn(snapshot, 'capture') || {};
     const microphone = diagnosticOwn(capture, 'microphone') || {};
     const system = diagnosticOwn(capture, 'system') || {};
+    const microphoneTelemetry = diagnosticOwn(microphone, 'telemetry') || {};
+    const systemTelemetry = diagnosticOwn(system, 'telemetry') || {};
     const stt = diagnosticOwn(snapshot, 'stt') || {};
     const chat = diagnosticOwn(snapshot, 'chat') || {};
     const failure = diagnosticOwn(snapshot, 'lastFailure') || {};
     const values = [
       diagnosticOwn(permissions, 'microphone'), diagnosticOwn(permissions, 'screen'),
       diagnosticOwn(microphone, 'state'), diagnosticOwn(system, 'state'),
+      diagnosticOwn(microphoneTelemetry, 'sampleRate'), diagnosticOwn(microphoneTelemetry, 'channelCount'), diagnosticOwn(microphoneTelemetry, 'packets'), diagnosticOwn(microphoneTelemetry, 'frames'), diagnosticOwn(microphoneTelemetry, 'signal'),
+      diagnosticOwn(systemTelemetry, 'sampleRate'), diagnosticOwn(systemTelemetry, 'channelCount'), diagnosticOwn(systemTelemetry, 'packets'), diagnosticOwn(systemTelemetry, 'frames'), diagnosticOwn(systemTelemetry, 'signal'),
       diagnosticOwn(stt, 'provider'), diagnosticOwn(stt, 'state'),
       diagnosticOwn(chat, 'provider'), diagnosticOwn(chat, 'ready'),
       diagnosticOwn(failure, 'category'), diagnosticOwn(failure, 'channel'), diagnosticOwn(failure, 'message')
@@ -1372,9 +1420,9 @@
     const chatProvider = diagnosticOwn(chat, 'provider');
 
     setDiagnosticState('diagnostics-mic-permission', diagnosticLabel(microphonePermission, 'Unknown'), diagnosticStateClass('permission', microphonePermission));
-    setDiagnosticState('diagnostics-mic-capture', diagnosticLabel(microphoneState, 'Off'), diagnosticStateClass('capture', microphoneState));
+    setDiagnosticState('diagnostics-mic-capture', captureDiagnosticLabel(microphone, microphoneState, 'Off'), diagnosticStateClass('capture', microphoneState));
     setDiagnosticState('diagnostics-screen-permission', diagnosticLabel(screenPermission, 'Unknown'), diagnosticStateClass('permission', screenPermission));
-    setDiagnosticState('diagnostics-system-capture', diagnosticLabel(systemState, 'Off'), diagnosticStateClass('capture', systemState));
+    setDiagnosticState('diagnostics-system-capture', captureDiagnosticLabel(system, systemState, 'Off'), diagnosticStateClass('capture', systemState));
     setDiagnosticState('diagnostics-stt-provider', diagnosticLabel(sttState, 'Off') + (typeof sttProvider === 'string' ? ' · ' + diagnosticText(sttProvider, '') : ''), diagnosticStateClass('stt', sttState));
     const chatLabel = chatReady === true
       ? 'Ready' + (typeof chatProvider === 'string' ? ' · ' + diagnosticText(chatProvider, '') : '')
