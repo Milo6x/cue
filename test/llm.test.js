@@ -5,6 +5,7 @@ const { OPTIONAL_API_KEY_PLACEHOLDER } = require('../src/openai-compatible');
 
 let capturedClientOptions = null;
 let capturedCompletionRequest = null;
+let openAICompletionError = null;
 const originalModuleLoad = Module._load;
 
 Module._load = function loadWithOpenAIStub(request, parent, isMain) {
@@ -16,6 +17,7 @@ Module._load = function loadWithOpenAIStub(request, parent, isMain) {
           completions: {
             create: async (completionRequest) => {
               capturedCompletionRequest = completionRequest;
+              if (openAICompletionError) throw openAICompletionError;
               return [{ choices: [{ delta: { content: 'ok' } }] }];
             }
           }
@@ -27,6 +29,7 @@ Module._load = function loadWithOpenAIStub(request, parent, isMain) {
 };
 
 const { createLLM, formatProviderErrorMessage, isQuotaError, CURRENT_GEMINI_DEFAULT } = require('../src/llm');
+const { ProviderRequestError } = require('../src/provider-errors');
 
 test.after(() => {
   Module._load = originalModuleLoad;
@@ -46,6 +49,7 @@ function createCustomSettings(overrides = {}) {
 test.beforeEach(() => {
   capturedClientOptions = null;
   capturedCompletionRequest = null;
+  openAICompletionError = null;
 });
 
 test('routes the Custom provider through the configured OpenAI-compatible endpoint', async () => {
@@ -106,6 +110,25 @@ test('requires a model for the Custom provider', () => {
 
   assert.equal(llm.ready, false);
   assert.match(llm.configurationError, /Set a Fast or Smart model/);
+});
+
+test('createLLM: incomplete settings reject with a categorized configuration error', async () => {
+  const llm = createLLM(createCustomSettings({ baseUrl: '' }));
+
+  await assert.rejects(
+    () => llm.stream({ system: '', turns: [], onToken: () => {} }),
+    error => error instanceof ProviderRequestError && error.category === 'configuration' && error.retryable === false && /Set a Base URL/.test(error.message)
+  );
+});
+
+test('createLLM: wraps an OpenAI-compatible network failure with retry metadata', async () => {
+  openAICompletionError = new Error('socket hang up');
+  const llm = createLLM(createCustomSettings());
+
+  await assert.rejects(
+    () => llm.stream({ system: '', turns: [], onToken: () => {} }),
+    error => error instanceof ProviderRequestError && error.category === 'network' && error.retryable === true && /try again/i.test(error.message)
+  );
 });
 
 // ---- MiniMax (PR #22) -----------------------------------------------------

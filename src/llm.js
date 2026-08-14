@@ -2,6 +2,11 @@
 // stream({ system, turns:[{role,text}], imageDataUrl, maxTokens, onToken }) -> Promise<fullText>
 
 const { createCompatibleClientOptions } = require('./openai-compatible');
+const {
+  ProviderRequestError,
+  isQuotaError,
+  redactSecrets
+} = require('./provider-errors');
 
 const CUSTOM_PROVIDER = 'custom';
 // gemini-2.0-flash was Google's default here until it was deprecated (Feb 2026)
@@ -26,66 +31,12 @@ const DEFAULT_MODELS = {
 // otherwise an existing user would keep re-hitting the same 404 forever.
 const DEAD_GEMINI_MODEL_RE = /^gemini-(1\.0|1\.5|2\.0)(?:-|$)/i;
 
-const PROVIDER_LABELS = { azure: 'Azure AI Foundry', openai: 'OpenAI', minimax: 'MiniMax' };
-
-function normalizeProviderName(provider) {
-  if (!provider) return 'provider';
-  if (PROVIDER_LABELS[provider]) return PROVIDER_LABELS[provider];
-  return provider.charAt(0).toUpperCase() + provider.slice(1);
-}
-
-// Pulled out so both the LLM and STT error paths (llm.js and stt.js) agree on
-// what counts as a rate-limit/quota failure instead of drifting independently.
-function isQuotaError(error) {
-  const status = error && (error.status || error.statusCode || error.response?.status);
-  const code = error && (error.code || error.error?.code);
-  const rawMessage = (error && (error.message || String(error))) || '';
-  const text = `${rawMessage} ${status || ''} ${code || ''}`.toLowerCase();
-  return status === 429 || code === 429 || code === 'insufficient_quota' || code === 'rate_limit_exceeded' ||
-    code === 'RESOURCE_EXHAUSTED' || /quota|billing|rate limit|exceeded your current quota|resource_exhausted|too many requests/i.test(text);
-}
-
-function isNotFoundError(error) {
-  const status = error && (error.status || error.statusCode || error.response?.status);
-  const code = error && (error.code || error.error?.code);
-  const rawMessage = (error && (error.message || String(error))) || '';
-  const text = `${rawMessage} ${status || ''} ${code || ''}`.toLowerCase();
-  return status === 404 || code === 404 || /\b404\b|is not found for api version|model not found/i.test(text);
-}
-
-// Gemini 429 bodies often carry a google.rpc.RetryInfo detail like
-// {"retryDelay":"38s"} inside the JSON error text. Not every quota error has
-// one (OpenAI/Anthropic don't), so this is best-effort and returns null when
-// absent instead of guessing a wait time.
-function extractRetryDelaySeconds(rawMessage) {
-  const match = /retryDelay"?\s*:\s*"?(\d+(?:\.\d+)?)\s*s/i.exec(String(rawMessage || ''));
-  if (!match) return null;
-  const seconds = Number(match[1]);
-  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
-}
-
-function formatRetryWait(seconds) {
-  if (seconds < 60) return `${Math.ceil(seconds)}s`;
-  const minutes = Math.round(seconds / 60);
-  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
-}
-
+// Direct callers historically receive raw messages for unrecognized errors.
+// Stream callers use ProviderRequestError and therefore retain network/service guidance and retry metadata.
 function formatProviderErrorMessage(error, provider, model) {
-  const label = normalizeProviderName(provider);
-  const rawMessage = (error && (error.message || String(error))) || '';
-
-  if (isQuotaError(error)) {
-    const retrySeconds = extractRetryDelaySeconds(rawMessage);
-    const waitHint = retrySeconds ? ` Wait about ${formatRetryWait(retrySeconds)}` : ' Wait a moment';
-    return `${label} free-tier quota exhausted (429 Too Many Requests).${waitHint} and try again, or add billing to your ${label} account. You can also switch providers or models in Settings.`;
-  }
-
-  if (isNotFoundError(error)) {
-    const modelHint = model ? ` "${model}"` : '';
-    return `${label} model${modelHint} is unavailable (404) — it may have been renamed, retired by the provider, or misspelled. Open Settings and pick a current model for ${label} (or clear the field to use cue's default), then try again.`;
-  }
-
-  return rawMessage || 'Unknown LLM error.';
+  const classified = ProviderRequestError.from(error, { provider, model });
+  if (['authentication', 'permission', 'quota', 'model'].includes(classified.category)) return classified.message;
+  return redactSecrets((error && (error.message || String(error))) || 'Unknown LLM error.');
 }
 
 function sanitizeTurns(turns) {
@@ -337,7 +288,11 @@ function createLLM(settings) {
     ready,
     configurationError,
     async stream(params) {
-      if (!ready) throw new Error(configurationError || `Complete the ${provider} provider settings.`);
+      if (!ready) {
+        const error = new Error(configurationError || `Complete the ${provider} provider settings.`);
+        error.category = 'configuration';
+        throw ProviderRequestError.from(error, { provider, model });
+      }
       const args = { apiKey, baseURL, endpoint, model, maxTokens, ...params, turns: sanitizeTurns(params.turns) };
       try {
         if (provider === 'openai') return await streamOpenAI(args);
@@ -350,7 +305,8 @@ function createLLM(settings) {
         if (provider === 'azure') return await streamAzure(args);
         throw new Error('unknown provider: ' + provider);
       } catch (error) {
-        throw new Error(formatProviderErrorMessage(error, provider, model));
+        if (error instanceof ProviderRequestError) throw error;
+        throw ProviderRequestError.from(error, { provider, model });
       }
     }
   };
