@@ -11,8 +11,16 @@ function excludes(readme, pattern, message) {
   assert.equal(pattern.test(readme), false, message);
 }
 
+function packageVersion(range, dependency) {
+  const match = String(range || '').match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/);
+  assert.ok(match, `package.json must declare a concrete ${dependency} version`);
+  return match[0];
+}
+
 test('README keeps high-risk listening, privacy, release, and recovery claims bounded', () => {
   const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+  const packageMetadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const electronVersion = packageVersion(packageMetadata.devDependencies && packageMetadata.devDependencies.electron, 'Electron');
 
   excludes(readme, /meeting audio is Windows-only/i, 'README must not describe meeting audio as Windows-only');
   includes(readme, /macOS 14\.4\+[\s\S]*ScreenCaptureKit loopback/i, 'README must document supported macOS loopback audio');
@@ -26,7 +34,7 @@ test('README keeps high-risk listening, privacy, release, and recovery claims bo
   includes(readme, /ad-hoc.*not a distributable public release/i, 'README must distinguish a local ad-hoc build');
   includes(readme, /notarizes, and staples the app/i, 'README must distinguish notarized distribution');
   includes(readme, /Automatic answers and continuous screen-change awareness.*Phase 2/i, 'README must preserve the Phase 2 boundary');
-  includes(readme, /Electron \*\*33\.2\.1\*\*.*high-severity.*not be represented as production-safe/is, 'README must retain the Electron audit limitation');
+  includes(readme, new RegExp(`Electron \\*\\*${electronVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\*\\*[\\s\\S]*high-severity.*not be represented as production-safe`, 'i'), 'README must retain the current Electron audit limitation');
 });
 
 test('README distinguishes configuration health from runtime provider validation', () => {
