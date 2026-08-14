@@ -307,7 +307,7 @@ function createWindow() {
     // Warn about missing content protection on old Windows builds
     if (isWindows && shouldProtect && !WIN_SUPPORTS_CONTENT_PROTECTION) {
       send('status', {
-        message: `Heads up: your Windows version (build ${WIN_BUILD}) does not support screen-share hiding. Upgrade to Windows 10 build 19041+ or Windows 11 to enable invisibility in screen shares.`
+        message: `Heads up: your Windows version (build ${WIN_BUILD}) does not support screen-capture exclusion/content protection. Upgrade to Windows 10 build 19041+ or Windows 11 to enable best-effort screen-capture exclusion/content protection. Verify before sharing sensitive content.`
       });
     }
   });
