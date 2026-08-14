@@ -174,15 +174,36 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
 }
 
 async function consumeGeminiStream(stream, onToken, signal) {
+  const iterator = stream[Symbol.asyncIterator]();
   let full = '';
-  for await (const chunk of stream) {
+  try {
+    while (true) {
+      const next = await nextGeminiChunk(iterator, signal);
+      if (next.done) return full;
+      const text = next.value && next.value.text;
+      if (emitToken(onToken, signal, text)) full += text;
+    }
+  } catch (error) {
     // @google/genai 2.12.0 exposes no public per-request AbortSignal option.
-    // Throwing inside for-await closes the iterator before this transport returns.
-    throwIfAborted(signal);
-    const text = chunk && chunk.text;
-    if (emitToken(onToken, signal, text)) full += text;
+    // Close the iterator ourselves because an abort can arrive while next() hangs.
+    if (typeof iterator.return === 'function') await iterator.return().catch(() => {});
+    if (signal && signal.aborted) throw cancelledError();
+    throw error;
   }
-  return full;
+}
+
+async function nextGeminiChunk(iterator, signal) {
+  throwIfAborted(signal);
+  if (!signal) return iterator.next();
+  let rejectAbort;
+  const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+  const onAbort = () => rejectAbort(cancelledError());
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await Promise.race([Promise.resolve().then(() => iterator.next()), aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, signal }) {

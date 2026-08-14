@@ -2,12 +2,12 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const { runStreamWithPolicy } = require('../src/request-policy');
+const { ProviderRequestError } = require('../src/provider-errors');
 
 function retryableError(message = 'temporary failure') {
   const error = new Error(message);
-  error.category = 'network';
-  error.retryable = true;
-  return error;
+  error.code = 'ECONNRESET';
+  return ProviderRequestError.from(error, { provider: 'openai' });
 }
 
 function finalError(category) {
@@ -58,6 +58,30 @@ test('does not retry a failure after a token', async () => {
     sleep: async () => assert.fail('must not sleep')
   }), error => error.category === 'network');
   assert.equal(attempts, 1);
+});
+
+test('does not retry a plain error that merely claims to be retryable', async () => {
+  let attempts = 0;
+  const error = new Error('not a classified provider error');
+  error.category = 'network';
+  error.retryable = true;
+  await assert.rejects(() => runStreamWithPolicy({
+    operation: async () => { attempts += 1; throw error; },
+    onToken: () => {},
+    sleep: async () => assert.fail('must not sleep')
+  }), returned => returned === error);
+  assert.equal(attempts, 1);
+});
+
+test('clamps configured attempts to one retry total', async () => {
+  let attempts = 0;
+  await assert.rejects(() => runStreamWithPolicy({
+    operation: async () => { attempts += 1; throw retryableError(); },
+    onToken: () => {},
+    maxAttempts: 99,
+    sleep: async () => {}
+  }), error => error instanceof ProviderRequestError && error.category === 'network');
+  assert.equal(attempts, 2);
 });
 
 for (const category of ['authentication', 'permission', 'quota', 'model', 'configuration']) {
@@ -164,6 +188,29 @@ test('external mid-flight abort cancels the policy and underlying signal', async
   controller.abort();
   await assert.rejects(() => pending, error => error.category === 'cancelled' && error.retryable === false);
   assert.equal(receivedSignal.aborted, true);
+});
+
+test('cancellation during retry backoff prevents a second operation', async () => {
+  const controller = new AbortController();
+  const sleepStarted = deferred();
+  let attempts = 0;
+  const pending = runStreamWithPolicy({
+    operation: async () => {
+      attempts += 1;
+      throw retryableError();
+    },
+    onToken: () => {},
+    signal: controller.signal,
+    sleep: () => {
+      sleepStarted.resolve();
+      return new Promise(resolve => { sleepStarted.release = resolve; });
+    }
+  });
+  await sleepStarted.promise;
+  controller.abort();
+  sleepStarted.release();
+  await assert.rejects(() => pending, error => error.category === 'cancelled' && error.retryable === false);
+  assert.equal(attempts, 1);
 });
 
 test('onToken failure cleans up without retrying', async () => {

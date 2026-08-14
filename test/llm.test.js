@@ -127,6 +127,29 @@ test('Gemini stream cancellation closes its iterator without emitting a late tok
   assert.deepEqual(receivedTokens, []);
 });
 
+test('Gemini cancellation closes a hanging next call promptly', async () => {
+  const controller = new AbortController();
+  let returned = 0;
+  const iterator = {
+    next() { return new Promise(() => {}); },
+    async return() { returned += 1; return { done: true }; },
+    [Symbol.asyncIterator]() { return this; }
+  };
+  const receivedTokens = [];
+  const pending = consumeGeminiStream(iterator, token => receivedTokens.push(token), controller.signal);
+  controller.abort();
+
+  await assert.rejects(
+    () => Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini cancellation did not settle promptly')), 30))
+    ]),
+    error => error.category === 'cancelled' && error.retryable === false
+  );
+  assert.equal(returned, 1);
+  assert.deepEqual(receivedTokens, []);
+});
+
 test('forwards AbortSignal to Anthropic request options', async () => {
   const controller = new AbortController();
   const receivedTokens = [];

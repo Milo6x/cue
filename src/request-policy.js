@@ -1,11 +1,26 @@
 // Bounds a streamed answer without letting a stalled provider wedge cue's UI.
 
+const { ProviderRequestError } = require('./provider-errors');
+
 const DEFAULT_INACTIVITY_MS = 25_000;
 const DEFAULT_MAX_ATTEMPTS = 2;
 const DEFAULT_RETRY_DELAY_MS = 250;
 
-function defaultSleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function defaultSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(makeCancelledError());
+    const timer = setTimeout(done, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      done(makeCancelledError());
+    };
+    function done(error) {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (error) reject(error);
+      else resolve();
+    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function normalizePositiveInteger(value, fallback) {
@@ -33,11 +48,26 @@ function makeTimeoutError() {
 
 function shouldRetry(error, attempt, maxAttempts, emitted, externallyAborted) {
   const finalCategories = new Set(['cancelled', 'authentication', 'permission', 'quota', 'model', 'configuration']);
+  const retryablePolicyTimeout = error && error.code === 'CUE_STREAM_TIMEOUT';
+  const retryableProviderFailure = error instanceof ProviderRequestError && error.retryable === true;
   return attempt < maxAttempts
     && !emitted
     && !externallyAborted
-    && error && error.retryable === true
+    && (retryablePolicyTimeout || retryableProviderFailure)
     && !finalCategories.has(error.category);
+}
+
+function waitForRetry(sleep, delayMs, signal) {
+  if (!signal) return Promise.resolve().then(() => sleep(delayMs));
+  if (signal.aborted) return Promise.reject(makeCancelledError());
+  let rejectAbort;
+  const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+  const onAbort = () => rejectAbort(makeCancelledError());
+  signal.addEventListener('abort', onAbort, { once: true });
+  return Promise.race([
+    Promise.resolve().then(() => sleep(delayMs, signal)),
+    aborted
+  ]).finally(() => signal.removeEventListener('abort', onAbort));
 }
 
 async function runStreamWithPolicy(options = {}) {
@@ -55,12 +85,13 @@ async function runStreamWithPolicy(options = {}) {
   if (typeof sleep !== 'function') throw new TypeError('sleep must be a function');
 
   const timeoutMs = normalizePositiveInteger(inactivityMs, DEFAULT_INACTIVITY_MS);
-  const attempts = normalizePositiveInteger(maxAttempts, DEFAULT_MAX_ATTEMPTS);
+  const attempts = Math.min(DEFAULT_MAX_ATTEMPTS, normalizePositiveInteger(maxAttempts, DEFAULT_MAX_ATTEMPTS));
   const retryDelay = Math.max(0, Number.isFinite(Number(retryDelayMs)) ? Number(retryDelayMs) : DEFAULT_RETRY_DELAY_MS);
 
   if (externalSignal && externalSignal.aborted) throw makeCancelledError();
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (externalSignal && externalSignal.aborted) throw makeCancelledError();
     const controller = new AbortController();
     let active = true;
     let emitted = false;
@@ -115,7 +146,7 @@ async function runStreamWithPolicy(options = {}) {
       controller.abort();
     }
     if (!shouldRetry(failure, attempt, attempts, emitted, !!(externalSignal && externalSignal.aborted))) throw failure;
-    await sleep(retryDelay * attempt);
+    await waitForRetry(sleep, retryDelay * attempt, externalSignal);
   }
 }
 
