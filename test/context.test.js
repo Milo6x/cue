@@ -38,7 +38,7 @@ test('buildUserTurn passes only the rolling window, not the full transcript', ()
   const ctx = buildContext({ transcript: turns });
   const turn = buildUserTurn(MODES.assist, ctx);
   assert.ok(typeof turn === 'string');
-  assert.ok(turn.includes('Them:'));
+  assert.ok(turn.includes('Meeting:'));
 });
 
 test('windowFor returns sensible sizes per mode', () => {

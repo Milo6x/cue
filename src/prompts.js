@@ -4,10 +4,11 @@
 // then optionally the user's AI rules appended at the end.
 
 const { appendAiRules } = require('./profile-context');
+const { formatTranscriptForPrompt } = require('./transcript-ledger');
 
 function formatTranscript(turns, limit) {
   const recent = limit ? turns.slice(-limit) : turns;
-  return recent.map((t) => (t.channel === 'them' ? 'Them: ' : 'You: ') + t.text).join('\n');
+  return formatTranscriptForPrompt(recent);
 }
 
 function buildSystem(base, contextBlock) {
@@ -67,7 +68,7 @@ const MODES = {
       return applyRules(buildSystem(
         'You are cue, whispering the perfect reply to the candidate during a live interview. ' +
         BASE_RULES +
-        '"Them" is the interviewer; "You" is the candidate.\n\n' +
+        '"Meeting" is the interviewer; "You" is the candidate.\n\n' +
         'Draft ONE natural, confident reply the candidate can say out loud, in first person.\n\n' +
         'Rules by question type:\n' +
         '• BEHAVIORAL: Use a real STAR story from their background. Situation (1 sentence) → Task (1 sentence) → Action (2–3 sentences, specific steps) → Result (1 sentence with metric if possible). Never generic.\n' +

@@ -2,6 +2,20 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { MODES } = require('../src/prompts');
 
+test('mode builds label meeting and candidate transcript turns consistently', () => {
+  const text = MODES.say.build({
+    transcript: [
+      { channel: 'them', text: 'Question' },
+      { channel: 'you', text: 'Answer' }
+    ],
+    userText: ''
+  });
+
+  assert.ok(text.includes('Meeting: Question'));
+  assert.ok(text.includes('You: Answer'));
+  assert.ok(!text.includes('Them: Question'));
+});
+
 test('assist mode gives a direct answer in first person', () => {
   const system = MODES.assist.buildSystem(null);
   const text = system + '\n' + MODES.assist.build({ transcript: [], userText: '' });
