@@ -184,12 +184,20 @@ async function consumeGeminiStream(stream, onToken, signal) {
       if (emitToken(onToken, signal, text)) full += text;
     }
   } catch (error) {
-    // @google/genai 2.12.0 exposes no public per-request AbortSignal option.
-    // Close the iterator ourselves because an abort can arrive while next() hangs.
+    // @google/genai 2.16.0 supports config.abortSignal. It stops the SDK's
+    // request; close the iterator as well without waiting for a blocked next().
+    if (signal && signal.aborted) {
+      closeGeminiIterator(iterator);
+      throw cancelledError();
+    }
     if (typeof iterator.return === 'function') await iterator.return().catch(() => {});
-    if (signal && signal.aborted) throw cancelledError();
     throw error;
   }
+}
+
+function closeGeminiIterator(iterator) {
+  if (typeof iterator.return !== 'function') return;
+  Promise.resolve().then(() => iterator.return()).catch(() => {});
 }
 
 async function nextGeminiChunk(iterator, signal) {
@@ -219,7 +227,7 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
     return { role: t.role === 'assistant' ? 'model' : 'user', parts };
   });
   const stream = await ai.models.generateContentStream({
-    model, contents, config: { systemInstruction: system, maxOutputTokens: maxTokens }
+    model, contents, config: { systemInstruction: system, maxOutputTokens: maxTokens, abortSignal: signal }
   });
   return consumeGeminiStream(stream, onToken, signal);
 }

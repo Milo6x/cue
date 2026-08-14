@@ -7,6 +7,7 @@ let capturedClientOptions = null;
 let capturedCompletionRequest = null;
 let capturedCompletionOptions = null;
 let capturedAnthropicRequestOptions = null;
+let capturedGeminiRequest = null;
 let openAICompletionError = null;
 const originalModuleLoad = Module._load;
 
@@ -40,6 +41,20 @@ Module._load = function loadWithOpenAIStub(request, parent, isMain) {
       }
     };
   }
+  if (request === '@google/genai') {
+    return {
+      GoogleGenAI: class FakeGoogleGenAI {
+        constructor() {
+          this.models = {
+            generateContentStream: async requestOptions => {
+              capturedGeminiRequest = requestOptions;
+              return (async function* () { yield { text: 'ok' }; })();
+            }
+          };
+        }
+      }
+    };
+  }
   return originalModuleLoad.call(this, request, parent, isMain);
 };
 
@@ -66,6 +81,7 @@ test.beforeEach(() => {
   capturedCompletionRequest = null;
   capturedCompletionOptions = null;
   capturedAnthropicRequestOptions = null;
+  capturedGeminiRequest = null;
   openAICompletionError = null;
 });
 
@@ -148,6 +164,60 @@ test('Gemini cancellation closes a hanging next call promptly', async () => {
   );
   assert.equal(returned, 1);
   assert.deepEqual(receivedTokens, []);
+});
+
+test('Gemini cancellation returns promptly while an actual generator is blocked in next', async () => {
+  const controller = new AbortController();
+  let releaseNext;
+  let nextStarted;
+  let cleaned = 0;
+  let markCleaned;
+  const cleanupFinished = new Promise(resolve => { markCleaned = resolve; });
+  async function* stream() {
+    try {
+      nextStarted();
+      yield { text: await new Promise(resolve => { releaseNext = resolve; }) };
+    } finally {
+      cleaned += 1;
+      markCleaned();
+    }
+  }
+  const started = new Promise(resolve => { nextStarted = resolve; });
+  const receivedTokens = [];
+  const pending = consumeGeminiStream(stream(), token => receivedTokens.push(token), controller.signal);
+  await started;
+  controller.abort();
+
+  try {
+    await assert.rejects(
+      () => Promise.race([
+        pending,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini generator cancellation did not settle promptly')), 30))
+      ]),
+      error => error.category === 'cancelled' && error.retryable === false
+    );
+  } finally {
+    releaseNext('late');
+    await Promise.race([
+      cleanupFinished,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini generator cleanup did not finish')), 30))
+    ]);
+    await pending.catch(() => {});
+  }
+  assert.equal(cleaned, 1);
+  assert.deepEqual(receivedTokens, []);
+});
+
+test('forwards AbortSignal through Gemini config', async () => {
+  const controller = new AbortController();
+  const llm = createLLM({
+    provider: 'gemini',
+    smart: false,
+    apiKeys: { gemini: 'test-key' },
+    models: { gemini: { fast: 'gemini-2.5-flash', smart: 'gemini-2.5-flash' } }
+  });
+  await llm.stream({ system: '', turns: [{ role: 'user', text: 'Hello' }], onToken: () => {}, signal: controller.signal });
+  assert.equal(capturedGeminiRequest.config.abortSignal, controller.signal);
 });
 
 test('forwards AbortSignal to Anthropic request options', async () => {

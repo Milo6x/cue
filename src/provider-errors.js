@@ -111,6 +111,15 @@ function formatRetryWait(seconds) {
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
+function isKnownSdkUserAbortError(error, provider) {
+  if (!['openai', 'azure', 'anthropic'].includes(provider)) return false;
+  return !!error
+    && error.constructor && error.constructor.name === 'APIUserAbortError'
+    && error.name === 'Error'
+    && /^request was aborted\.?$/i.test(String(error.message || '').trim())
+    && (error.status === undefined || error.status === null);
+}
+
 function classifyProviderError(error, context = {}) {
   if (error instanceof ProviderRequestError) {
     return {
@@ -151,7 +160,7 @@ function classifyProviderError(error, context = {}) {
   } else if (explicitCategory === 'timeout') {
     category = 'timeout';
     retryable = true;
-  } else if (errorName === 'aborterror' || normalizedCode === 'abort_err' || /\baborterror\b|\babort_err\b/i.test(text)) {
+  } else if (isKnownSdkUserAbortError(error, provider) || errorName === 'aborterror' || normalizedCode === 'abort_err' || /\baborterror\b|\babort_err\b/i.test(text)) {
     category = 'cancelled';
   } else if (normalizedCode === 'unauthenticated') {
     category = 'authentication';

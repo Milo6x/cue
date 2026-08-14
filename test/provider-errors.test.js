@@ -110,6 +110,26 @@ test('keeps AbortError cancellation out of automatic retry', () => {
   assert.equal(policyTimeout.retryable, true);
 });
 
+test('classifies installed OpenAI and Anthropic APIUserAbortError shapes as cancelled', () => {
+  const OpenAI = require('openai');
+  const Anthropic = require('@anthropic-ai/sdk');
+  for (const [provider, error] of [
+    ['openai', new OpenAI.APIUserAbortError()],
+    ['azure', new OpenAI.APIUserAbortError()],
+    ['anthropic', new Anthropic.APIUserAbortError()]
+  ]) {
+    assert.equal(error.name, 'Error');
+    assert.equal(error.message, 'Request was aborted.');
+    const classified = classifyProviderError(error, { provider });
+    assert.equal(classified.category, 'cancelled');
+    assert.equal(classified.retryable, false);
+    assert.equal(classified.message, 'Request was cancelled.');
+  }
+  const ordinaryError = classifyProviderError(new Error('Request was aborted.'), { provider: 'openai' });
+  assert.equal(ordinaryError.category, 'unknown');
+  assert.equal(ordinaryError.retryable, false);
+});
+
 test('infers transient transport failures when no explicit HTTP status exists', () => {
   const cases = [
     [new Error('got status: 503 Service Unavailable'), 'service', true],
