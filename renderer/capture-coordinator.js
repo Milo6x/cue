@@ -6,6 +6,7 @@
       this.onChange = onChange;
       this.startPromise = null;
       this.stopPromise = null;
+      this.teardownPromise = null;
       this.lifecycleVersion = 0;
       this.state = this.createOffState();
     }
@@ -70,7 +71,6 @@
       }
 
       if (!this.isCurrentLifecycle(lifecycleVersion)) {
-        if (pipelineActive) await this.setPipelineActive(false);
         return this.snapshot();
       }
 
@@ -87,14 +87,8 @@
     async stopSession(interruptedStart) {
       this.state.session.state = 'stopping';
       this.publish();
-      await this.setPipelineActive(false);
       if (interruptedStart) await interruptedStart;
-      await Promise.allSettled([
-        Promise.resolve().then(() => this.channels.microphone.stop()),
-        Promise.resolve().then(() => this.channels.system.stop())
-      ]);
-      this.state = this.createOffState();
-      this.publish();
+      if (this.state.session.state !== 'off') await this.teardown();
       return this.snapshot();
     }
 
@@ -103,9 +97,23 @@
     }
 
     async cleanupAfterFailedStart() {
+      await this.teardown();
+    }
+
+    teardown() {
+      if (this.teardownPromise) return this.teardownPromise;
+
+      this.teardownPromise = this.performTeardown().finally(() => {
+        this.teardownPromise = null;
+      });
+      return this.teardownPromise;
+    }
+
+    async performTeardown() {
       this.state.session.state = 'stopping';
       this.publish();
       await Promise.allSettled([
+        Promise.resolve().then(() => this.setPipelineActive(false)),
         Promise.resolve().then(() => this.channels.microphone.stop()),
         Promise.resolve().then(() => this.channels.system.stop())
       ]);
@@ -133,12 +141,15 @@
         return;
       }
 
-      const reason = result.reason || {};
+      const reason = result.reason;
+      const details = reason && (typeof reason === 'object' || typeof reason === 'function')
+        ? reason
+        : {};
       this.state[name] = {
         state: 'failed',
         trackLabel: null,
-        errorCategory: reason.category || 'capture',
-        errorMessage: this.safeMessage(reason.message)
+        errorCategory: details.category || 'capture',
+        errorMessage: this.safeMessage(details.message == null ? reason : details.message)
       };
     }
 
@@ -165,7 +176,11 @@
     }
 
     publish() {
-      this.onChange(this.copyState());
+      try {
+        this.onChange(this.copyState());
+      } catch (_) {
+        // State observers cannot interrupt capture lifecycle cleanup.
+      }
     }
   }
 

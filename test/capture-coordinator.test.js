@@ -84,7 +84,7 @@ test('returns to off and cleans both drivers when both channels fail', async () 
 
   await coordinator.start();
 
-  assert.deepEqual(pipelineCalls, []);
+  assert.deepEqual(pipelineCalls, [false]);
   assert.deepEqual(drivers.calls, {
     microphone: { start: 1, stop: 1 },
     system: { start: 1, stop: 1 }
@@ -216,6 +216,51 @@ test('starts a new lifecycle only after an interrupted start has stopped', async
   assert.deepEqual(pipelineCalls, [false, true]);
 });
 
+test('finishes teardown when pipeline deactivation rejects', async () => {
+  const drivers = createDrivers();
+  const pipelineCalls = [];
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async (active) => {
+      pipelineCalls.push(active);
+      if (!active) throw new Error('Pipeline shutdown failed');
+      return true;
+    }
+  });
+
+  await coordinator.start();
+  await coordinator.stop();
+
+  assert.equal(coordinator.snapshot().session.state, 'off');
+  assert.deepEqual(drivers.calls, {
+    microphone: { start: 1, stop: 1 },
+    system: { start: 1, stop: 1 }
+  });
+  assert.deepEqual(pipelineCalls, [true, false]);
+  await coordinator.start();
+  assert.equal(coordinator.snapshot().session.state, 'ready');
+});
+
+test('ignores observer errors while completing the capture lifecycle', async () => {
+  const drivers = createDrivers();
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async () => true,
+    onChange: (snapshot) => {
+      if (snapshot.session.state === 'ready') throw new Error('Observer failed');
+    }
+  });
+
+  await coordinator.start();
+  await coordinator.stop();
+
+  assert.equal(coordinator.snapshot().session.state, 'off');
+  assert.deepEqual(drivers.calls, {
+    microphone: { start: 1, stop: 1 },
+    system: { start: 1, stop: 1 }
+  });
+});
+
 test('cleans partial resources when pipeline activation is unavailable', async () => {
   const drivers = createDrivers();
   const pipelineCalls = [];
@@ -229,12 +274,85 @@ test('cleans partial resources when pipeline activation is unavailable', async (
 
   await coordinator.start();
 
-  assert.deepEqual(pipelineCalls, [true]);
+  assert.deepEqual(pipelineCalls, [true, false]);
   assert.deepEqual(drivers.calls, {
     microphone: { start: 1, stop: 1 },
     system: { start: 1, stop: 1 }
   });
   assert.equal(coordinator.snapshot().session.state, 'off');
+});
+
+test('deactivates and cleans resources when pipeline activation rejects', async () => {
+  const drivers = createDrivers();
+  const pipelineCalls = [];
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async (active) => {
+      pipelineCalls.push(active);
+      if (active) throw new Error('Pipeline startup failed');
+      return true;
+    }
+  });
+
+  await coordinator.start();
+
+  assert.deepEqual(pipelineCalls, [true, false]);
+  assert.deepEqual(drivers.calls, {
+    microphone: { start: 1, stop: 1 },
+    system: { start: 1, stop: 1 }
+  });
+  assert.equal(coordinator.snapshot().session.state, 'off');
+});
+
+test('shares teardown when stop arrives during failed-start cleanup', async () => {
+  const drivers = createDrivers({
+    microphoneStart: async () => { throw new Error('Microphone unavailable'); },
+    systemStart: async () => { throw new Error('System audio unavailable'); }
+  });
+  let releaseStops;
+  let markStopStarted;
+  const stopGate = new Promise((resolve) => { releaseStops = resolve; });
+  const stopStarted = new Promise((resolve) => { markStopStarted = resolve; });
+  drivers.channels.microphone.stop = async () => {
+    drivers.calls.microphone.stop += 1;
+    markStopStarted();
+    await stopGate;
+  };
+  drivers.channels.system.stop = async () => {
+    drivers.calls.system.stop += 1;
+    await stopGate;
+  };
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async () => true
+  });
+
+  const starting = coordinator.start();
+  await stopStarted;
+  const stopping = coordinator.stop();
+  releaseStops();
+  await Promise.all([starting, stopping]);
+
+  assert.equal(coordinator.snapshot().session.state, 'off');
+  assert.deepEqual(drivers.calls, {
+    microphone: { start: 1, stop: 1 },
+    system: { start: 1, stop: 1 }
+  });
+});
+
+test('stores a primitive channel rejection as a safe error message', async () => {
+  const drivers = createDrivers({
+    systemStart: async () => { throw 'permission denied'; }
+  });
+  const coordinator = new CaptureCoordinator({
+    channels: drivers.channels,
+    setPipelineActive: async () => true
+  });
+
+  await coordinator.start();
+
+  assert.equal(coordinator.snapshot().system.errorCategory, 'capture');
+  assert.equal(coordinator.snapshot().system.errorMessage, 'permission denied');
 });
 
 test('isolates snapshots from caller and change-listener mutations', async () => {
