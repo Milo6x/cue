@@ -40,6 +40,23 @@ test('classifies 403 permission failures before generic text fallbacks', () => {
   assert.match(formatProviderErrorMessage(error, 'anthropic', 'claude-test'), /permissions.*selected model/i);
 });
 
+test('uses an explicit HTTP status before conflicting provider text', () => {
+  const cases = [
+    [503, 'quota exhausted', 'service', true],
+    [403, 'invalid api key', 'permission', false],
+    [404, 'quota exhausted', 'model', false],
+    [429, 'model missing', 'quota', false],
+    [401, 'forbidden', 'authentication', false],
+    [408, 'model missing', 'service', true]
+  ];
+
+  for (const [status, message, category, retryable] of cases) {
+    const classified = classifyProviderError(Object.assign(new Error(message), { status }));
+    assert.equal(classified.category, category, `${status} ${message}`);
+    assert.equal(classified.retryable, retryable, `${status} ${message}`);
+  }
+});
+
 test('recognizes quota shapes, preserves retry delay, and does not mark quota retryable', () => {
   const error = Object.assign(new Error('RESOURCE_EXHAUSTED {"retryDelay":"38s"}'), { code: 'RESOURCE_EXHAUSTED' });
   const classified = classifyProviderError(error, { provider: 'gemini' });
@@ -63,7 +80,7 @@ test('turns a 404 model failure into a safe actionable message', () => {
   assert.doesNotMatch(wrapped.message, /exception parsing response|not-for-display/);
 });
 
-test('marks service, network, and timeout errors retryable', () => {
+test('marks service, network, and explicit policy timeouts retryable', () => {
   assert.deepEqual(
     classifyProviderError(Object.assign(new Error('upstream failure'), { status: 503 })).category,
     'service'
@@ -73,8 +90,39 @@ test('marks service, network, and timeout errors retryable', () => {
   assert.equal(classifyProviderError(new Error('socket hang up')).retryable, true);
   assert.equal(classifyProviderError(new Error('Network Error')).category, 'network');
   assert.equal(classifyProviderError(new Error('network connection failed')).category, 'network');
-  assert.equal(classifyProviderError(new Error('request timed out')).category, 'timeout');
-  assert.equal(classifyProviderError(new Error('request timed out')).retryable, true);
+  const timeout = classifyProviderError(Object.assign(new Error('policy threshold'), { category: 'timeout' }));
+  assert.equal(timeout.category, 'timeout');
+  assert.equal(timeout.retryable, true);
+});
+
+test('keeps AbortError cancellation out of automatic retry', () => {
+  for (const error of [
+    Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }),
+    Object.assign(new Error('request stopped'), { code: 'ABORT_ERR' })
+  ]) {
+    const classified = classifyProviderError(error, { provider: 'openai' });
+    assert.equal(classified.category, 'cancelled');
+    assert.equal(classified.retryable, false);
+    assert.equal(classified.message, 'Request was cancelled.');
+  }
+  assert.equal(classifyProviderError(new Error('request timed out')).category, 'unknown');
+});
+
+test('maps provider status codes without a numeric HTTP status', () => {
+  const cases = [
+    ['UNAUTHENTICATED', 'authentication', false],
+    ['permission_denied', 'permission', false],
+    ['NOT_FOUND', 'model', false],
+    ['DEADLINE_EXCEEDED', 'timeout', true],
+    ['unavailable', 'service', true],
+    ['RESOURCE_EXHAUSTED', 'quota', false]
+  ];
+
+  for (const [code, category, retryable] of cases) {
+    const classified = classifyProviderError(Object.assign(new Error('provider code'), { code }));
+    assert.equal(classified.category, category, code);
+    assert.equal(classified.retryable, retryable, code);
+  }
 });
 
 test('keeps unknown errors non-retryable and redacts secrets without hiding useful text', () => {
@@ -99,6 +147,28 @@ test('keeps unknown errors non-retryable and redacts secrets without hiding usef
   assert.match(assignmentHeader, /next=safe/);
   assert.doesNotMatch(redactSecrets('authorization = Basic lower-case secret'), /Basic|lower-case|secret/);
   assert.doesNotMatch(redactSecrets('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature-value'), /eyJhbGciOiJIUzI1NiJ9/);
+});
+
+test('redacts named provider API keys in messages and sanitized causes', () => {
+  const credentials = '"x-api-key":"x secret value"; x-goog-api-key=goog secret value; OPENAI_API_KEY: openai secret value; ANTHROPIC_API_KEY = anthropic secret value; GEMINI_API_KEY=gemini secret value; vendor_api_key: vendor secret value; next=safe';
+  const redacted = redactSecrets(credentials);
+  const wrapped = ProviderRequestError.from(new Error(credentials), { provider: 'openai' });
+
+  assert.doesNotMatch(redacted, /x secret|goog secret|openai secret|anthropic secret|gemini secret|vendor secret/);
+  assert.match(redacted, /next=safe/);
+  assert.doesNotMatch(wrapped.message, /x secret|goog secret|openai secret|anthropic secret|gemini secret|vendor secret/);
+  assert.doesNotMatch(wrapped.cause.message, /x secret|goog secret|openai secret|anthropic secret|gemini secret|vendor secret/);
+});
+
+test('bounds huge provider text before safe classification output', () => {
+  const huge = `useful prefix ${'x'.repeat(10_000)} sk-huge-secret-value`;
+  const error = Object.assign(new Error(huge), { response: { data: { body: huge } } });
+  const classified = classifyProviderError(error);
+
+  assert.equal(classified.category, 'unknown');
+  assert.match(classified.message, /useful prefix/);
+  assert.ok(classified.message.length <= 8_192);
+  assert.doesNotMatch(classified.message, /sk-huge-secret-value/);
 });
 
 test('sanitizes the cause without copying a provider request or response', () => {
