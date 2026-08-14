@@ -565,17 +565,18 @@ async function runFeature(mode, userText) {
 // -------- IPC --------
 ipcMain.handle('settings:get', () => store.getSettings());
 ipcMain.handle('settings:set', (_e, patch) => { sttDisabled = false; return store.setSettings(patch); });
-ipcMain.handle('capture:toggle', () => {
-  const targetState = !desiredCaptureState;
-  desiredCaptureState = targetState;
-  if (!targetState && !state.capturing && localWhisperTranscriber) {
+function requestCaptureState(targetState) {
+  desiredCaptureState = !!targetState;
+  if (!desiredCaptureState && !state.capturing && localWhisperTranscriber) {
     localWhisperTranscriber.forceStop().catch(() => {});
   }
   captureTransition = captureTransition
     .catch(() => state.capturing)
-    .then(() => setCapturing(targetState));
+    .then(() => setCapturing(desiredCaptureState));
   return captureTransition;
-});
+}
+ipcMain.handle('capture:set', (_event, active) => requestCaptureState(active));
+ipcMain.handle('capture:toggle', () => requestCaptureState(!desiredCaptureState));
 ipcMain.handle('capture:state', () => ({ active: state.capturing }));
 ipcMain.handle('whisper:models', () => getWhisperOverview());
 ipcMain.handle('whisper:model-download', async (_event, modelId) => {
