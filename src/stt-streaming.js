@@ -85,10 +85,24 @@ class OpenAIRealtimeSTT {
     this._pendingAudio = [];
     this._sessionReady = false;
     this._stopped = false;
+    this._transcriptionItems = new Map();
+    this._transcriptionOrder = [];
+    this._transcriptionResults = new Map();
+    this._transcriptionSequence = 0;
+    this._handledTranscriptionIds = new Set();
+    this._handledTranscriptionOrder = [];
+    this._maxTrackedTranscriptions = 64;
+    this._maxHandledTranscriptions = 128;
+    this._reorderTimeoutMs = Number.isFinite(options.reorderTimeoutMs) && options.reorderTimeoutMs > 0
+      ? options.reorderTimeoutMs
+      : 15000;
+    this._reorderTimer = null;
+    this._reorderTimerItemId = null;
   }
 
   async connect() {
     if (this.ws && this.connected) return;
+    this._resetTranscriptionOrder();
     this._stopped = false;
 
     try {
@@ -133,6 +147,7 @@ class OpenAIRealtimeSTT {
       this.ws.on('close', (code) => {
         this.connected = false;
         this._sessionReady = false;
+        this._resetTranscriptionOrder();
         if (this._stopped) return;
         this.onStatusChange('disconnected');
         if (code !== 1000 && !this.reconnecting) {
@@ -166,9 +181,15 @@ class OpenAIRealtimeSTT {
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
-        if (!isNuisanceOpenAIRealtimeFinal(event.transcript, this.languages)) {
-          this.onTranscript(event.transcript.trim());
-        }
+        this._completeTranscription(event.item_id, event.transcript);
+        break;
+
+      case 'conversation.item.input_audio_transcription.failed':
+        this._failTranscription(event.item_id, event.error);
+        break;
+
+      case 'conversation.item.created':
+        this._trackTranscriptionItem(event.item?.id, event.previous_item_id);
         break;
 
       case 'input_audio_buffer.speech_started':
@@ -178,6 +199,7 @@ class OpenAIRealtimeSTT {
         break;
 
       case 'input_audio_buffer.committed':
+        this._trackTranscriptionItem(event.item_id, event.previous_item_id);
         break;
 
       case 'error':
@@ -189,6 +211,178 @@ class OpenAIRealtimeSTT {
         });
         break;
     }
+  }
+
+  _normalizeTranscriptionItemId(value) {
+    if (typeof value !== 'string') return null;
+    const id = value.trim();
+    return id && id.length <= 512 ? id : null;
+  }
+
+  _trackTranscriptionItem(rawItemId, rawPreviousItemId) {
+    const itemId = this._normalizeTranscriptionItemId(rawItemId);
+    if (!itemId || this._handledTranscriptionIds.has(itemId)) return;
+    const previousItemId = this._normalizeTranscriptionItemId(rawPreviousItemId);
+    const existing = this._transcriptionItems.get(itemId);
+
+    if (existing) {
+      if (previousItemId) existing.previousItemId = previousItemId;
+    } else {
+      this._transcriptionItems.set(itemId, {
+        itemId,
+        previousItemId,
+        sequence: this._transcriptionSequence++
+      });
+    }
+
+    this._rebuildTranscriptionOrder();
+    while (this._transcriptionOrder.length > this._maxTrackedTranscriptions) {
+      this._skipTranscriptionItem(this._transcriptionOrder[0]);
+    }
+    this._flushOrderedTranscriptions();
+  }
+
+  _rebuildTranscriptionOrder() {
+    const entries = Array.from(this._transcriptionItems.values());
+    const children = new Map();
+    for (const entry of entries) {
+      const siblings = children.get(entry.previousItemId) || [];
+      siblings.push(entry);
+      children.set(entry.previousItemId, siblings);
+    }
+    for (const siblings of children.values()) {
+      siblings.sort((a, b) => a.sequence - b.sequence);
+    }
+
+    const roots = entries.filter((entry) => {
+      const previous = entry.previousItemId;
+      return !previous || previous === 'root' || this._handledTranscriptionIds.has(previous) || !this._transcriptionItems.has(previous);
+    }).sort((a, b) => {
+      const aKnownRoot = !a.previousItemId || a.previousItemId === 'root' || this._handledTranscriptionIds.has(a.previousItemId);
+      const bKnownRoot = !b.previousItemId || b.previousItemId === 'root' || this._handledTranscriptionIds.has(b.previousItemId);
+      return Number(bKnownRoot) - Number(aKnownRoot) || a.sequence - b.sequence;
+    });
+
+    const ordered = [];
+    const visited = new Set();
+    const visit = (entry) => {
+      if (!entry || visited.has(entry.itemId)) return;
+      visited.add(entry.itemId);
+      ordered.push(entry.itemId);
+      for (const child of children.get(entry.itemId) || []) visit(child);
+    };
+    for (const root of roots) visit(root);
+    for (const entry of entries.sort((a, b) => a.sequence - b.sequence)) visit(entry);
+    this._transcriptionOrder = ordered;
+  }
+
+  _completeTranscription(rawItemId, transcript) {
+    const itemId = this._normalizeTranscriptionItemId(rawItemId);
+    if (itemId && this._handledTranscriptionIds.has(itemId)) return;
+    const text = String(transcript || '').trim();
+    const result = { text: isNuisanceOpenAIRealtimeFinal(text, this.languages) ? null : text };
+
+    // The committed event normally precedes completion on the same WebSocket. If
+    // an ID is missing or unknown, holding it cannot improve ordering and would
+    // risk buffering it forever, so preserve the legacy immediate fallback.
+    if (!itemId || !this._transcriptionItems.has(itemId)) {
+      if (result.text) this.onTranscript(result.text);
+      return;
+    }
+
+    this._transcriptionResults.set(itemId, result);
+    this._flushOrderedTranscriptions();
+  }
+
+  _failTranscription(rawItemId, error) {
+    const itemId = this._normalizeTranscriptionItemId(rawItemId);
+    if (itemId && !this._handledTranscriptionIds.has(itemId)) {
+      if (this._transcriptionItems.has(itemId)) {
+        this._transcriptionResults.set(itemId, { text: null });
+        this._flushOrderedTranscriptions();
+      } else {
+        this._rememberHandledTranscription(itemId);
+      }
+    }
+    this.onError({
+      provider: 'openai-realtime',
+      message: error?.message || 'Realtime transcription failed',
+      status: error?.code
+    });
+  }
+
+  _flushOrderedTranscriptions() {
+    this._rebuildTranscriptionOrder();
+    while (this._transcriptionOrder.length > 0) {
+      const itemId = this._transcriptionOrder[0];
+      const item = this._transcriptionItems.get(itemId);
+      const previous = item?.previousItemId;
+      const missingPredecessor = previous && previous !== 'root' &&
+        !this._handledTranscriptionIds.has(previous) && !this._transcriptionItems.has(previous);
+      const result = this._transcriptionResults.get(itemId);
+      if (missingPredecessor || !result) break;
+
+      this._transcriptionItems.delete(itemId);
+      this._transcriptionResults.delete(itemId);
+      this._rememberHandledTranscription(itemId);
+      if (result.text) this.onTranscript(result.text);
+      this._rebuildTranscriptionOrder();
+    }
+
+    if (this._transcriptionOrder.length > 0) this._scheduleReorderTimeout(this._transcriptionOrder[0]);
+    else this._clearReorderTimeout();
+  }
+
+  _scheduleReorderTimeout(itemId) {
+    if (this._reorderTimer && this._reorderTimerItemId === itemId) return;
+    this._clearReorderTimeout();
+    this._reorderTimerItemId = itemId;
+    this._reorderTimer = setTimeout(() => {
+      this._reorderTimer = null;
+      this._reorderTimerItemId = null;
+      if (this._stopped) return;
+      const item = this._transcriptionItems.get(itemId);
+      const previous = item?.previousItemId;
+      if (previous && previous !== 'root' && !this._transcriptionItems.has(previous)) {
+        this._rememberHandledTranscription(previous);
+      }
+      if (!this._transcriptionResults.has(itemId)) this._skipTranscriptionItem(itemId);
+      this._flushOrderedTranscriptions();
+    }, this._reorderTimeoutMs);
+    if (typeof this._reorderTimer.unref === 'function') this._reorderTimer.unref();
+  }
+
+  _skipTranscriptionItem(itemId) {
+    if (!itemId) return;
+    this._transcriptionItems.delete(itemId);
+    this._transcriptionResults.delete(itemId);
+    this._rememberHandledTranscription(itemId);
+    this._rebuildTranscriptionOrder();
+  }
+
+  _rememberHandledTranscription(itemId) {
+    if (!itemId || this._handledTranscriptionIds.has(itemId)) return;
+    this._handledTranscriptionIds.add(itemId);
+    this._handledTranscriptionOrder.push(itemId);
+    while (this._handledTranscriptionOrder.length > this._maxHandledTranscriptions) {
+      this._handledTranscriptionIds.delete(this._handledTranscriptionOrder.shift());
+    }
+  }
+
+  _clearReorderTimeout() {
+    if (this._reorderTimer) clearTimeout(this._reorderTimer);
+    this._reorderTimer = null;
+    this._reorderTimerItemId = null;
+  }
+
+  _resetTranscriptionOrder() {
+    this._clearReorderTimeout();
+    this._transcriptionItems.clear();
+    this._transcriptionOrder = [];
+    this._transcriptionResults.clear();
+    this._transcriptionSequence = 0;
+    this._handledTranscriptionIds.clear();
+    this._handledTranscriptionOrder = [];
   }
 
   sendAudio(pcmBuffer) {
@@ -265,6 +459,7 @@ class OpenAIRealtimeSTT {
     this._stopped = true;
     this._sessionReady = false;
     this._pendingAudio = [];
+    this._resetTranscriptionOrder();
     if (this.ws) {
       this.ws.close(1000);
       this.ws = null;

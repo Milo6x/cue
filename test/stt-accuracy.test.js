@@ -113,3 +113,58 @@ test('OpenAI realtime holds buffered audio until its transcription configuration
   assert.equal(stt._sessionReady, true);
   assert.equal(flushes, 1);
 });
+
+test('OpenAI realtime emits completed turns in committed chronology when completions arrive out of order', () => {
+  const finals = [];
+  const stt = new OpenAIRealtimeSTT('k', { onTranscript: (text) => finals.push(text) });
+
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-a', previous_item_id: 'root' });
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-b', previous_item_id: 'item-a' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-b', transcript: 'second' });
+  assert.deepEqual(finals, []);
+
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-a', transcript: 'first' });
+  assert.deepEqual(finals, ['first', 'second']);
+});
+
+test('OpenAI realtime transcription failure unblocks later turns and ignores the failed item late final', () => {
+  const finals = [];
+  const errors = [];
+  const stt = new OpenAIRealtimeSTT('k', {
+    onTranscript: (text) => finals.push(text),
+    onError: (error) => errors.push(error)
+  });
+
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-a', previous_item_id: 'root' });
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-b', previous_item_id: 'item-a' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-b', transcript: 'second' });
+  stt._handleEvent({
+    type: 'conversation.item.input_audio_transcription.failed',
+    item_id: 'item-a',
+    error: { message: 'could not transcribe', code: 'transcription_failed' }
+  });
+
+  assert.deepEqual(finals, ['second']);
+  assert.deepEqual(errors, [{ provider: 'openai-realtime', message: 'could not transcribe', status: 'transcription_failed' }]);
+
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-a', transcript: 'late first' });
+  assert.deepEqual(finals, ['second']);
+});
+
+test('OpenAI realtime bounds a turn whose predecessor ID never arrives and falls back for finals without IDs', async () => {
+  const finals = [];
+  const stt = new OpenAIRealtimeSTT('k', {
+    reorderTimeoutMs: 10,
+    onTranscript: (text) => finals.push(text)
+  });
+
+  stt._handleEvent({ type: 'input_audio_buffer.committed', item_id: 'item-b', previous_item_id: 'missing-item-a' });
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-b', transcript: 'tracked second' });
+  assert.deepEqual(finals, []);
+
+  stt._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'fallback without id' });
+  assert.deepEqual(finals, ['fallback without id']);
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(finals, ['fallback without id', 'tracked second']);
+});
